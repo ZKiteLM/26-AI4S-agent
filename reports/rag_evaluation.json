@@ -1,0 +1,71 @@
+{
+  "model": "qwen3:4b-instruct",
+  "cases": [
+    {
+      "case": "adam_parameters",
+      "passed": true,
+      "status": "completed",
+      "answer": "β1 是 0.9，β2 是 0.98 [c8a7e9d4-e141-4583-a1db-3cd11323b1ed]。",
+      "cited_papers": [
+        "8a0d078f-150f-4e2c-b045-72c5e813122f"
+      ],
+      "evidence_pages": [
+        [
+          "Attention Is All You Need",
+          7
+        ]
+      ],
+      "error": null,
+      "run_id": "39857315-253e-4293-ba97-efebc884682b"
+    },
+    {
+      "case": "training_hardware",
+      "passed": true,
+      "status": "completed",
+      "answer": "Transformer 论文训练用了8张 NVIDIA P100 GPU。 [17b41eb7-8bb3-40c7-9dc0-476a4ba441ff]",
+      "cited_papers": [
+        "8a0d078f-150f-4e2c-b045-72c5e813122f"
+      ],
+      "evidence_pages": [
+        [
+          "Attention Is All You Need",
+          7
+        ]
+      ],
+      "error": null,
+      "run_id": "d7070fcc-8c7c-44f9-b611-a311ffb840e5"
+    },
+    {
+      "case": "cross_paper_attention",
+      "passed": true,
+      "status": "completed",
+      "answer": "Attention Is All You Need · 注意力架构：提出一种全新的网络架构，即Transformer，完全基于注意力机制，摒弃了循环和卷积结构。 [a6bee02f-6334-451a-b440-df43b6f685dd]\nAttention Is All You Need · 研究目标：我们提出一种新的网络架构，Transformer，完全基于注意力机制，摒弃了循环和卷积结构。 [a6bee02f-6334-451a-b440-df43b6f685dd]\nLanguage Models are Few-Shot Learners · 注意力架构：采用与GPT-2相同的模型架构，包括修改的初始化、预归一化和可逆分词，但在层中使用交替的密集和局部带状稀疏注意力模式，类似于Sparse Transformer。 [17e49151-e689-420f-a458-416362f9fcf1]\nLanguage Models are Few-Shot Learners · 研究目标：我们研究模型规模对机器学习性能的影响，通过训练8个不同规模的模型，范围从1.25亿到1750亿参数，以探讨规模与性能之间的关系。 [17e49151-e689-420f-a458-416362f9fcf1]",
+      "cited_papers": [
+        "80a3a338-e8b5-4717-aacf-57ca8a80049d",
+        "8a0d078f-150f-4e2c-b045-72c5e813122f"
+      ],
+      "evidence_pages": [
+        [
+          "Attention Is All You Need",
+          2
+        ],
+        [
+          "Language Models are Few-Shot Learners",
+          8
+        ]
+      ],
+      "error": null,
+      "run_id": "c05a086f-ef15-4d10-abe6-524bb4d3dca8"
+    },
+    {
+      "case": "unsupported_question",
+      "passed": true,
+      "status": "completed",
+      "answer": "回答未通过证据校验，无法可靠确认。请重试或缩小问题范围。",
+      "cited_papers": [],
+      "evidence_pages": [],
+      "error": null,
+      "run_id": "971faedd-f598-4400-b6b3-e686cff8154c"
+    }
+  ]
+}

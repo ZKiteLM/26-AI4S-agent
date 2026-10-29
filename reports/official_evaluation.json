@@ -1,0 +1,69 @@
+{
+  "1706.03762v7.pdf": {
+    "status": "completed",
+    "pages": 15,
+    "blocks": 173,
+    "characters": 40930,
+    "heading_blocks": 24,
+    "equation_blocks": 5,
+    "table_blocks": 4,
+    "normalized_bbox_ratio": 1.0,
+    "located_bbox_ratio": 1.0,
+    "parser_counts": {
+      "mineru": 173
+    },
+    "seconds": 29.28
+  },
+  "1706.03762v1.pdf": {
+    "status": "completed",
+    "pages": 15,
+    "blocks": 167,
+    "characters": 37087,
+    "heading_blocks": 24,
+    "equation_blocks": 6,
+    "table_blocks": 4,
+    "normalized_bbox_ratio": 1.0,
+    "located_bbox_ratio": 1.0,
+    "parser_counts": {
+      "mineru": 167
+    },
+    "seconds": 17.36
+  },
+  "1706.03762v1_img.pdf": {
+    "status": "completed",
+    "pages": 15,
+    "blocks": 166,
+    "characters": 38630,
+    "heading_blocks": 24,
+    "equation_blocks": 6,
+    "table_blocks": 4,
+    "normalized_bbox_ratio": 1.0,
+    "located_bbox_ratio": 1.0,
+    "parser_counts": {
+      "mineru": 166
+    },
+    "seconds": 33.56
+  },
+  "UnderstandingDeepLearning_02_09_26_C.pdf": {
+    "status": "completed",
+    "pages": 541,
+    "blocks": 11270,
+    "characters": 1324495,
+    "heading_blocks": 537,
+    "equation_blocks": 0,
+    "table_blocks": 0,
+    "normalized_bbox_ratio": 1.0,
+    "located_bbox_ratio": 1.0,
+    "parser_counts": {
+      "pymupdf": 11270
+    },
+    "seconds": 5.47
+  },
+  "version_identity": {
+    "same_paper": true,
+    "version_order": [
+      "v7",
+      "v1"
+    ]
+  }
+}

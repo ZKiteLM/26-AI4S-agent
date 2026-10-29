@@ -1,0 +1,10 @@
+.git
+.venv
+.env
+dev.db
+storage
+科研小助手
+apps/web/node_modules
+apps/web/.next
+.playwright-cli
+reports

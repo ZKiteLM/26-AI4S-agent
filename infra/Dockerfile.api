@@ -1,0 +1,9 @@
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
+COPY alembic.ini ./
+COPY services ./services
+RUN uv sync --locked --no-dev
+ENV PYTHONPATH=/app
+CMD ["sh", "-c", "uv run --locked alembic upgrade head && uv run --locked uvicorn services.api.app.main:app --host 0.0.0.0 --port 8000"]
