@@ -2,7 +2,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     mineru_command: str = "mineru-kit"
     parser_backend: Literal["local", "remote"] = "local"
     parser_vector_enhance: bool = True
+    parser_vector_max_pages: int = Field(default=50, ge=0)
     mineru_api_url: str = ""
     mineru_api_key: str = ""
     local_storage: str = "storage"

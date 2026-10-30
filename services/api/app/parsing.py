@@ -294,7 +294,8 @@ def _mineru_markdown(value: object) -> str:
 
 def parse_pdf(data: bytes, progress: Callable[[int, int], None] | None = None) -> list[dict]:
     doc = pymupdf.open(stream=BytesIO(data), filetype="pdf")
-    enhance_vector = settings().parser_vector_enhance and len(doc) <= 50
+    cfg = settings()
+    enhance_vector = cfg.parser_vector_enhance and len(doc) <= cfg.parser_vector_max_pages
     blocks = []
     current_section: list[str] = []
     for start in range(0, len(doc), 10):
