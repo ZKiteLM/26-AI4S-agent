@@ -23,15 +23,6 @@ export default function Research() {
   }
   return (
     <>
-      <div className="workspace-hero">
-        <div>
-          <div className="section-label">EVIDENCE FIRST RESEARCH</div>
-          <h1>科研问答</h1>
-          <p className="lead">
-            选择一篇或多篇论文，查看 Agent 的检索、证据和回答。
-          </p>
-        </div>
-      </div>
       <div className="research-layout">
         <PaperPicker selected={selected} onChange={setSelected} />
         <div className="panel stack">

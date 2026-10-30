@@ -95,11 +95,6 @@ export default function Discover() {
   }
   return (
     <>
-      <div className="section-label">DISCOVERY</div>
-      <h1>发现论文</h1>
-      <p className="lead">
-        检索真实学术元数据、导入开放获取论文，追踪研究主题。
-      </p>
       {error && <p className="error">{error}</p>}
       {message && <p className="success">{message}</p>}
       <div className="panel">

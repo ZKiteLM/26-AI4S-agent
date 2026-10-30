@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiFile } from "@/lib/api";
+import { citationAtPoint } from "@/lib/citations";
 
 type PdfDocument = import("pdfjs-dist").PDFDocumentProxy;
 type PdfPage = import("pdfjs-dist").PDFPageProxy;
@@ -13,7 +14,10 @@ type Props = {
   focus: { pageIndex: number; bbox: number[] } | null;
   onPageChange: (pageIndex: number) => void;
   onLocationClick: (pageIndex: number, x: number, y: number) => void;
+  onSelectText?: (text: string) => void;
+  onCitationClick?: (number: number) => void;
   initialPage?: number;
+  jumpPage?: { page: number; nonce: number; y?: number } | null;
 };
 
 function Page({
@@ -24,6 +28,8 @@ function Page({
   focus,
   register,
   onLocationClick,
+  onSelectText,
+  onCitationClick,
 }: {
   document: PdfDocument;
   pageIndex: number;
@@ -32,6 +38,8 @@ function Page({
   focus: number[] | null;
   register: (element: HTMLDivElement | null) => void;
   onLocationClick: Props["onLocationClick"];
+  onSelectText?: Props["onSelectText"];
+  onCitationClick?: Props["onCitationClick"];
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const layerRef = useRef<HTMLDivElement>(null);
@@ -107,7 +115,19 @@ function Page({
               ? { width: viewport.width, height: viewport.height }
               : undefined
           }
+          onMouseUp={() => {
+            const selected = window.getSelection()?.toString().trim();
+            if (selected) onSelectText?.(selected);
+          }}
           onClick={(event) => {
+            if (window.getSelection()?.toString().trim()) return;
+            const citation =
+              layerRef.current &&
+              citationAtPoint(layerRef.current, event.clientX, event.clientY);
+            if (citation !== null) {
+              onCitationClick?.(citation);
+              return;
+            }
             const canvas = canvasRef.current;
             if (!canvas) return;
             const rect = canvas.getBoundingClientRect();
@@ -150,7 +170,10 @@ export default function ContinuousPdfViewer({
   focus,
   onPageChange,
   onLocationClick,
+  onSelectText,
+  onCitationClick,
   initialPage = 1,
+  jumpPage,
 }: Props) {
   const [document, setDocument] = useState<PdfDocument | null>(null);
   const [count, setCount] = useState(pageCount);
@@ -206,6 +229,19 @@ export default function ContinuousPdfViewer({
     const container = scrollRef.current;
     if (target && container) container.scrollTop = target.offsetTop;
   }, [document, initialPage, scrollRef]);
+
+  useEffect(() => {
+    if (!document || !jumpPage) return;
+    const target = nodes.current[jumpPage.page - 1];
+    const container = scrollRef.current;
+    if (target && container) {
+      const y = jumpPage.y || 0;
+      container.scrollTop =
+        target.offsetTop +
+        y * target.clientHeight -
+        (y ? container.clientHeight * 0.25 : 0);
+    }
+  }, [document, jumpPage, scrollRef]);
 
   useEffect(() => {
     const container = scrollRef.current;
@@ -273,6 +309,8 @@ export default function ContinuousPdfViewer({
               nodes.current[index] = element;
             }}
             onLocationClick={onLocationClick}
+            onSelectText={onSelectText}
+            onCitationClick={onCitationClick}
           />
         ))}
     </div>

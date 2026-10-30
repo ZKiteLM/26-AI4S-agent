@@ -6,5 +6,5 @@ export default async function LegacyTranslate({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  redirect(`/papers/${id}?mode=bilingual`);
+  redirect(`/papers/${id}?panel=bilingual`);
 }

@@ -31,9 +31,6 @@ export default function Tasks() {
   }
   return (
     <>
-      <div className="section-label">BACKGROUND ACTIVITY</div>
-      <h1>任务中心</h1>
-      <p className="lead">解析、索引和科研分析的真实执行状态。</p>
       {error && <p className="error">{error}</p>}
       <div className="list">
         {tasks.map((t) => (

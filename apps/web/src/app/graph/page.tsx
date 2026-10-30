@@ -54,11 +54,6 @@ export default function GraphPage() {
   }
   return (
     <>
-      <div className="section-label">CITATION NETWORK</div>
-      <h1>引用图谱与研究洞察</h1>
-      <p className="lead">
-        边来自可核查的 OpenAlex 引用记录，方向为“引用者 → 被引用者”。
-      </p>
       <PaperPicker selected={selected} onChange={setSelected} />
       <div className="row">
         <button

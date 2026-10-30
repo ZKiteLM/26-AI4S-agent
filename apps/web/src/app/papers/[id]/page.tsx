@@ -1,14 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useRef, useState } from "react";
 import { api, Paper } from "@/lib/api";
-import PdfCanvas from "@/components/PdfCanvas";
 import PdfThumbnails from "@/components/PdfThumbnails";
 import ReaderColumns from "@/components/ReaderColumns";
-import BilingualReader from "@/components/BilingualReader";
+import BilingualPane from "@/components/BilingualPane";
+import ContinuousPdfViewer from "@/components/ContinuousPdfViewer";
 import MathMarkdown from "@/components/MathMarkdown";
 import RunPanel from "@/components/RunPanel";
+import { ReaderBlock } from "@/lib/reader";
 import {
   BookOpenText,
   Languages,
@@ -31,7 +32,8 @@ type Block = {
   text: string;
   bbox: number[];
 };
-type Mode = "read" | "assistant" | "focus" | "bilingual";
+type RightMode = "none" | "selection" | "bilingual";
+type PdfClick = { pageIndex: number; x: number; y: number; nonce: number };
 
 export default function Reader({
   params,
@@ -44,8 +46,11 @@ export default function Reader({
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [page, setPage] = useState(1);
-  const [focus, setFocus] = useState<string | null>(null);
-  const [mode, setMode] = useState<Mode>("read");
+  const [initialPage, setInitialPage] = useState(1);
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [rightMode, setRightMode] = useState<RightMode>("none");
+  const [aiOpen, setAiOpen] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
   const [outlineOpen, setOutlineOpen] = useState(true);
   const [outlineView, setOutlineView] = useState<"outline" | "thumbnails">(
     "outline",
@@ -53,7 +58,12 @@ export default function Reader({
   const [jumpPage, setJumpPage] = useState<{
     page: number;
     nonce: number;
+    y?: number;
   } | null>(null);
+  const [pdfClick, setPdfClick] = useState<PdfClick | null>(null);
+  const [bilingualFocus, setBilingualFocus] = useState<ReaderBlock | null>(
+    null,
+  );
   const [question, setQuestion] = useState("");
   const [run, setRun] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -62,15 +72,25 @@ export default function Reader({
   const [returnPage, setReturnPage] = useState<number | null>(null);
   const [reparsing, setReparsing] = useState(false);
   const [translating, setTranslating] = useState(false);
+  const pdfRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const url = new URL(window.location.href);
-    const next = url.searchParams.get("mode");
+    const initial = Math.max(1, Number(url.searchParams.get("page") || 1));
+    const legacy = url.searchParams.get("mode");
+    const panel = url.searchParams.get("panel");
     const frame = requestAnimationFrame(() => {
-      setPage(Math.max(1, Number(url.searchParams.get("page") || 1)));
-      setFocus(url.searchParams.get("block"));
-      if (["read", "assistant", "focus", "bilingual"].includes(next || ""))
-        setMode(next as Mode);
+      setPage(initial);
+      setInitialPage(initial);
+      setFocusId(url.searchParams.get("block"));
+      if (panel === "selection" || panel === "bilingual") setRightMode(panel);
+      else if (legacy === "bilingual") setRightMode("bilingual");
+      else if (legacy === "assistant") {
+        setRightMode("selection");
+        setAiOpen(true);
+      }
+      setAiOpen((previous) => previous || url.searchParams.get("ai") === "1");
+      setFocusMode(url.searchParams.get("focus") === "1" || legacy === "focus");
       setOutlineOpen(
         window.localStorage.getItem("reader-outline-open") !== "false",
       );
@@ -127,56 +147,67 @@ export default function Reader({
   }, [version, activeVersion?.parse_status]);
 
   function updateUrl(
-    nextMode = mode,
     nextPage = page,
-    nextFocus: string | null = focus,
+    nextFocus: string | null = focusId,
+    nextPanel = rightMode,
+    nextAi = aiOpen,
+    nextFocusMode = focusMode,
   ) {
     const url = new URL(window.location.href);
     url.searchParams.set("page", String(nextPage));
-    if (nextMode === "read") url.searchParams.delete("mode");
-    else url.searchParams.set("mode", nextMode);
+    url.searchParams.delete("mode");
     if (nextFocus) url.searchParams.set("block", nextFocus);
     else url.searchParams.delete("block");
+    if (nextPanel === "none") url.searchParams.delete("panel");
+    else url.searchParams.set("panel", nextPanel);
+    if (nextAi) url.searchParams.set("ai", "1");
+    else url.searchParams.delete("ai");
+    if (nextFocusMode) url.searchParams.set("focus", "1");
+    else url.searchParams.delete("focus");
     window.history.replaceState(null, "", url.pathname + url.search);
   }
-  function changeMode(next: Mode) {
-    setMode(next);
-    updateUrl(next);
+  function toggleRight(next: Exclude<RightMode, "none">) {
+    const value = rightMode === next ? "none" : next;
+    setRightMode(value);
+    setBilingualFocus(null);
+    updateUrl(page, focusId, value);
+  }
+  function toggleAi() {
+    setAiOpen(!aiOpen);
+    updateUrl(page, focusId, rightMode, !aiOpen);
+  }
+  function toggleFocus() {
+    setFocusMode(!focusMode);
+    updateUrl(page, focusId, rightMode, aiOpen, !focusMode);
   }
   function changeOutline(open: boolean) {
     setOutlineOpen(open);
     window.localStorage.setItem("reader-outline-open", String(open));
   }
-  function goPage(next: number) {
+  function goPage(next: number, blockId: string | null = null) {
     const target = Math.max(1, Math.min(activeVersion?.page_count || 1, next));
     setPage(target);
-    setFocus(null);
+    setFocusId(blockId);
+    const y = blockId
+      ? blocks.find((block) => block.id === blockId)?.bbox[1]
+      : undefined;
     setJumpPage((previous) => ({
       page: target,
       nonce: (previous?.nonce || 0) + 1,
+      y,
     }));
-    updateUrl(mode, target, null);
+    updateUrl(target, blockId);
   }
   function switchVersion(next: string) {
     if (next === version) return;
     setSelectedVersion(next);
-    setPage(1);
-    setFocus(null);
     setBlocks([]);
     setRun(null);
     setSelectedText("");
     setTranslatedText("");
-    setJumpPage((previous) => ({ page: 1, nonce: (previous?.nonce || 0) + 1 }));
-    updateUrl(mode, 1, null);
-  }
-  function jump(block: Block) {
-    setPage(block.page_index + 1);
-    setFocus(block.id);
-    setJumpPage((previous) => ({
-      page: block.page_index + 1,
-      nonce: (previous?.nonce || 0) + 1,
-    }));
-    updateUrl(mode, block.page_index + 1, block.id);
+    setBilingualFocus(null);
+    setInitialPage(1);
+    goPage(1);
   }
   const references = blocks.filter((block) => block.type === "reference");
   function jumpCitation(number: number) {
@@ -185,7 +216,7 @@ export default function Reader({
     );
     if (reference) {
       setReturnPage(page);
-      jump(reference);
+      goPage(reference.page_index + 1, reference.id);
     } else setError(`未能定位参考文献 [${number}]`);
   }
   async function reparse() {
@@ -230,7 +261,7 @@ export default function Reader({
     }
   }
 
-  const focused = blocks.find((block) => block.id === focus);
+  const focused = blocks.find((block) => block.id === focusId);
   const headings = blocks.filter(
     (block) => block.type === "heading" || block.type === "title",
   );
@@ -267,8 +298,8 @@ export default function Reader({
           headings.map((block) => (
             <button
               key={block.id}
-              className={`outline-item ${focus === block.id ? "active" : ""}`}
-              onClick={() => jump(block)}
+              className={`outline-item ${focusId === block.id ? "active" : ""}`}
+              onClick={() => goPage(block.page_index + 1, block.id)}
             >
               {block.text.slice(0, 85)}
             </button>
@@ -290,9 +321,11 @@ export default function Reader({
       )}
     </aside>
   );
-  const selectionPanel = (
-    <aside className="panel reader-side-panel">
-      <h3>划词翻译</h3>
+  const selectionPanel = rightMode === "selection" && (
+    <section className="reader-module selection-pane">
+      <div className="reader-module-head">
+        <strong>划词翻译</strong>
+      </div>
       {selectedText ? (
         <>
           <p className="selected-source">{selectedText.slice(0, 1200)}</p>
@@ -310,131 +343,76 @@ export default function Reader({
           )}
         </>
       ) : (
-        <p className="muted">在左侧 PDF 中选择文字，译文将在这里显示。</p>
+        <p className="muted">在 PDF 中选择文字，译文将在这里显示。</p>
       )}
-      {mode === "assistant" && (
-        <div className="reader-qa">
-          <h3>论文问答</h3>
-          {version !== paper?.preferred_version_id && (
-            <p className="muted">问答检索默认版本的内容。</p>
-          )}
-          <textarea
-            className="textarea"
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            placeholder="询问论文细节…"
-          />
-          <button className="button" disabled={!question.trim()} onClick={ask}>
-            检索证据并回答
-          </button>
-          <div className="reader-run">
-            <RunPanel runId={run} />
-          </div>
-        </div>
+    </section>
+  );
+  const aiPanel = aiOpen && (
+    <section className="reader-module reader-ai-pane">
+      <div className="reader-module-head">
+        <strong>AI 问答</strong>
+      </div>
+      {version !== paper?.preferred_version_id && (
+        <p className="muted">问答检索默认版本的内容。</p>
       )}
+      <textarea
+        className="textarea"
+        value={question}
+        onChange={(event) => setQuestion(event.target.value)}
+        placeholder="询问论文细节…"
+        aria-label="论文问题"
+      />
+      <button className="button" disabled={!question.trim()} onClick={ask}>
+        检索证据并回答
+      </button>
+      <div className="reader-run">
+        <RunPanel runId={run} />
+      </div>
+    </section>
+  );
+  const right = !focusMode && (rightMode !== "none" || aiOpen) && version && (
+    <aside className={`reader-side-stack ${aiOpen ? "with-ai" : ""}`}>
+      {selectionPanel}
+      {rightMode === "bilingual" && (
+        <BilingualPane
+          key={version}
+          version={version}
+          pageCount={activeVersion?.page_count || 1}
+          page={page}
+          pdfRef={pdfRef}
+          pdfClick={pdfClick}
+          onPageChange={setPage}
+          onFocus={setBilingualFocus}
+        />
+      )}
+      {aiPanel}
     </aside>
   );
-  const documentPanel = version && (
-    <div className="panel reader-document">
-      <div className="document-toolbar">
-        <button
-          className="button secondary"
-          disabled={page <= 1}
-          onClick={() => goPage(page - 1)}
-        >
-          上一页
-        </button>
-        <span className="page-indicator">
-          {page} / {activeVersion?.page_count || "—"} 页
-        </span>
-        <button
-          className="button secondary"
-          disabled={page >= (activeVersion?.page_count || 1)}
-          onClick={() => goPage(page + 1)}
-        >
-          下一页
-        </button>
-        {returnPage && (
-          <button
-            className="button ghost"
-            onClick={() => {
-              goPage(returnPage);
-              setReturnPage(null);
-            }}
-          >
-            返回引用处
-          </button>
-        )}
-      </div>
-      <PdfCanvas
-        versionId={version}
-        page={page}
-        bbox={focused?.bbox}
-        onSelectText={(text) => {
-          setSelectedText(text);
-          setTranslatedText("");
-          if (mode === "focus") changeMode("read");
-        }}
-        onCitationClick={jumpCitation}
-      />
-    </div>
-  );
+
   return (
-    <>
-      <div className="reader-header">
-        <div>
-          <Link href="/library" className="back-link">
-            ← 文献库
-          </Link>
-          <h1>{paper?.title || "论文阅读器"}</h1>
-          <p className="lead">原文阅读 · 结构化大纲 · 可定位证据</p>
-        </div>
-        <div className="mode-switch" role="group" aria-label="阅读模式">
-          {(
-            [
-              ["read", BookOpenText, "阅读"],
-              ["assistant", PanelRight, "AI 辅助"],
-              ["focus", Maximize2, "专注"],
-              ["bilingual", Languages, "双语"],
-            ] as const
-          ).map(([value, Icon, label]) => (
-            <button
-              key={value}
-              className={`button ${mode === value ? "active" : ""}`}
-              aria-pressed={mode === value}
-              onClick={() => changeMode(value)}
-            >
-              <Icon size={15} /> {label}
-            </button>
-          ))}
-        </div>
-      </div>
-      {error && <div className="error">{error}</div>}
+    <div className="paper-reader-page">
+      {error && <div className="error reader-inline-error">{error}</div>}
       {paper && !versions.length && (
         <div className="panel reader-status">
-          此记录目前只有论文元数据，尚未导入 PDF，因此没有可解析的目录。
+          此记录只有论文元数据，尚未导入 PDF。
         </div>
       )}
       {activeVersion && activeVersion.parse_status !== "completed" && (
-        <div className="panel reader-status">
+        <div className="reader-status-inline">
           {activeVersion.parse_status === "failed"
-            ? "此版本解析失败。请到任务中心查看错误并重试。"
+            ? "解析失败，请到任务中心查看。"
             : activeVersion.parse_status === "conflict"
-              ? "此版本等待版本冲突处理。"
-              : "此版本正在等待或执行解析；页面会自动更新。若长时间停留在排队状态，请到调试后台检查 parser Worker。"}
-          <Link href="/debug">查看调试后台 →</Link>
+              ? "此版本等待冲突处理。"
+              : "此版本正在解析；页面会自动更新。"}
+          <Link href="/debug">调试后台</Link>
         </div>
       )}
-      {preferred &&
-        preferred.id !== version &&
-        preferred.parse_status !== "completed" && (
-          <div className="panel reader-status">
-            默认版本仍在解析；当前展示一个已完成解析的版本。
-          </div>
-        )}
       {versions.length > 0 && (
-        <div className="version-bar">
-          <span className="section-label">论文版本</span>
+        <div className="version-bar reader-version-bar">
+          <span className="paper-title" title={paper?.title || ""}>
+            {paper?.title || "论文"}
+          </span>
+          <span className="section-label">版本</span>
           {versions.map((item) => (
             <button
               key={item.id}
@@ -461,46 +439,124 @@ export default function Reader({
             )}
         </div>
       )}
-      {version &&
-        (mode === "bilingual" ? (
-          <BilingualReader
-            key={version}
-            version={version}
-            pageCount={activeVersion?.page_count || 1}
-            initialPage={page}
-            outline={outline}
-            outlineOpen={outlineOpen}
-            onOutlineOpen={() => changeOutline(true)}
-            jumpPage={jumpPage}
-            onPageChange={setPage}
-          />
-        ) : mode === "focus" ? (
-          <div className="reader-focus-document">{documentPanel}</div>
-        ) : (
-          <ReaderColumns
-            outline={outline}
-            center={documentPanel}
-            right={selectionPanel}
-            outlineOpen={outlineOpen}
-            onOutlineOpen={() => changeOutline(true)}
-          />
-        ))}
-      {references.length > 0 && mode !== "focus" && (
-        <details className="panel references-panel">
-          <summary>参考文献 · {references.length} 条</summary>
-          <div className="list">
-            {references.map((item) => (
+      {version && (
+        <>
+          <div className="reader-control-bar">
+            <div className="reader-page-controls">
               <button
                 className="button ghost"
-                key={item.id}
-                onClick={() => jump(item)}
+                disabled={page <= 1}
+                onClick={() => goPage(page - 1)}
               >
-                {item.text.slice(0, 240)}
+                上一页
               </button>
-            ))}
+              <span className="page-indicator">
+                {page} / {activeVersion?.page_count || "—"} 页
+              </span>
+              <button
+                className="button ghost"
+                disabled={page >= (activeVersion?.page_count || 1)}
+                onClick={() => goPage(page + 1)}
+              >
+                下一页
+              </button>
+              {returnPage && (
+                <button
+                  className="button ghost"
+                  onClick={() => {
+                    goPage(returnPage);
+                    setReturnPage(null);
+                  }}
+                >
+                  返回引用处
+                </button>
+              )}
+            </div>
+            <div
+              className="reader-module-toggles"
+              role="group"
+              aria-label="阅读工具"
+            >
+              <button
+                className={`button ${rightMode === "selection" && !focusMode ? "active" : "ghost"}`}
+                aria-pressed={rightMode === "selection" && !focusMode}
+                disabled={focusMode}
+                onClick={() => toggleRight("selection")}
+              >
+                <BookOpenText size={15} /> 划词翻译
+              </button>
+              <button
+                className={`button ${rightMode === "bilingual" && !focusMode ? "active" : "ghost"}`}
+                aria-pressed={rightMode === "bilingual" && !focusMode}
+                disabled={focusMode}
+                onClick={() => toggleRight("bilingual")}
+              >
+                <Languages size={15} /> 双语滚动
+              </button>
+              <button
+                className={`button ${aiOpen && !focusMode ? "active" : "ghost"}`}
+                aria-pressed={aiOpen && !focusMode}
+                disabled={focusMode}
+                onClick={toggleAi}
+              >
+                <PanelRight size={15} /> AI 问答
+              </button>
+              <button
+                className={`button ${focusMode ? "active" : "ghost"}`}
+                aria-pressed={focusMode}
+                onClick={toggleFocus}
+              >
+                <Maximize2 size={15} /> 专注
+              </button>
+            </div>
           </div>
-        </details>
+          <ReaderColumns
+            outline={outline}
+            outlineOpen={outlineOpen}
+            onOutlineOpen={() => changeOutline(true)}
+            center={
+              <ContinuousPdfViewer
+                versionId={version}
+                pageCount={activeVersion?.page_count || 1}
+                initialPage={initialPage}
+                jumpPage={jumpPage}
+                scrollRef={pdfRef}
+                focus={
+                  bilingualFocus && rightMode === "bilingual"
+                    ? {
+                        pageIndex: bilingualFocus.page_index,
+                        bbox: bilingualFocus.bbox,
+                      }
+                    : focused
+                      ? { pageIndex: focused.page_index, bbox: focused.bbox }
+                      : null
+                }
+                onPageChange={(index) => setPage(index + 1)}
+                onSelectText={(text) => {
+                  if (focusMode || rightMode === "bilingual") return;
+                  setSelectedText(text);
+                  setTranslatedText("");
+                  if (rightMode === "none") {
+                    setRightMode("selection");
+                    updateUrl(page, focusId, "selection");
+                  }
+                }}
+                onCitationClick={jumpCitation}
+                onLocationClick={(pageIndex, x, y) => {
+                  if (rightMode !== "bilingual" || focusMode) return;
+                  setPdfClick((previous) => ({
+                    pageIndex,
+                    x,
+                    y,
+                    nonce: (previous?.nonce || 0) + 1,
+                  }));
+                }}
+              />
+            }
+            right={right || undefined}
+          />
+        </>
       )}
-    </>
+    </div>
   );
 }

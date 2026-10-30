@@ -177,6 +177,7 @@ export function useBilingualSync({
       translation.removeEventListener("keydown", markManual);
       translation.removeEventListener("scroll", onTranslationScroll);
       if (frame.current) cancelAnimationFrame(frame.current);
+      frame.current = 0;
     };
   }, [
     pdfRef,

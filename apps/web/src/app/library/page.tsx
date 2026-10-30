@@ -61,12 +61,7 @@ export default function Library() {
   }
   return (
     <>
-      <div className="workspace-hero">
-        <div>
-          <div className="section-label">LITERATURE LIBRARY</div>
-          <h1>文献库</h1>
-          <p className="lead">导入、解析和组织可追溯的科研资料。</p>
-        </div>
+      <div className="workspace-hero compact-actions">
         <button
           className="button"
           type="button"

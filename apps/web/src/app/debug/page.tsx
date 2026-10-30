@@ -98,14 +98,7 @@ export default function Debug() {
     ) || [];
   return (
     <>
-      <div className="workspace-hero">
-        <div>
-          <div className="section-label">SYSTEM OBSERVABILITY</div>
-          <h1>调试后台</h1>
-          <p className="lead">
-            集中查看 API、解析 Worker、数据库活动与任务队列。只读，每 4 秒更新。
-          </p>
-        </div>
+      <div className="workspace-hero compact-actions">
         <div className="row">
           <span className="muted">{updated && `更新于 ${updated}`}</span>
           <button className="button secondary" onClick={load}>

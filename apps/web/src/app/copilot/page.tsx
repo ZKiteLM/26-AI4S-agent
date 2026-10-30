@@ -93,9 +93,6 @@ export default function Copilot() {
   }
   return (
     <>
-      <div className="section-label">ACADEMIC COPILOT</div>
-      <h1>写作与数据可视化</h1>
-      <p className="lead">生成可编辑草稿、可核查参考文献、图表与脚本。</p>
       {error && <p className="error">{error}</p>}
       <section className="panel stack">
         <h2>Idea → 论文框架</h2>
