@@ -89,9 +89,17 @@ export default function Reader({
   }, [versions, refreshPaper]);
   useEffect(() => {
     if (!version) return;
+    let cancelled = false;
     api<{ blocks: Block[] }>(`/versions/${version}/blocks`)
-      .then((x) => setBlocks(x.blocks))
-      .catch((e) => setError(String(e)));
+      .then((x) => {
+        if (!cancelled) setBlocks(x.blocks);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [version, activeVersion?.parse_status]);
   async function ask() {
     try {
@@ -135,6 +143,7 @@ export default function Reader({
     window.history.replaceState(null, "", `?page=${next}`);
   }
   function switchVersion(next: string) {
+    if (next === version) return;
     setSelectedVersion(next);
     setPage(1);
     setFocus(null);
