@@ -4,6 +4,7 @@ import { use, useEffect, useState } from "react";
 import { api, Paper } from "@/lib/api";
 import PdfCanvas from "@/components/PdfCanvas";
 import RunPanel from "@/components/RunPanel";
+import { BookOpenText, Languages, Maximize2, PanelRight } from "lucide-react";
 
 type Version = {
   id: string;
@@ -36,7 +37,8 @@ export default function Reader({
     [selectedText, setSelectedText] = useState(""),
     [translatedText, setTranslatedText] = useState(""),
     [returnPage, setReturnPage] = useState<number | null>(null),
-    [showAssistant, setShowAssistant] = useState(false);
+    [showAssistant, setShowAssistant] = useState(false),
+    [focusMode, setFocusMode] = useState(false);
   useEffect(() => {
     const url = new URL(window.location.href);
     const frame = requestAnimationFrame(() => {
@@ -123,32 +125,56 @@ export default function Reader({
   const references = blocks.filter((b) => b.type === "reference");
   return (
     <>
-      <div className="toolbar">
+      <div className="reader-header">
         <div>
-          <Link href="/library" className="muted">
+          <Link href="/library" className="back-link">
             ← 文献库
           </Link>
           <h1>{paper?.title || "论文阅读器"}</h1>
-          <p className="lead">原始 PDF、结构化内容与可定位证据</p>
+          <p className="lead">原文阅读 · 结构化目录 · 可定位证据</p>
         </div>
-        <div className="row">
+        <div className="mode-switch" role="group" aria-label="阅读模式">
           <button
-            className="button secondary"
-            onClick={() => setShowAssistant(!showAssistant)}
+            className={`button ${!showAssistant && !focusMode ? "active" : ""}`}
+            aria-pressed={!showAssistant && !focusMode}
+            onClick={() => {
+              setShowAssistant(false);
+              setFocusMode(false);
+            }}
           >
-            {showAssistant ? "收起侧栏" : "内容与问答"}
+            <BookOpenText size={15} /> 阅读
+          </button>
+          <button
+            className={`button ${showAssistant && !focusMode ? "active" : ""}`}
+            aria-pressed={showAssistant && !focusMode}
+            onClick={() => {
+              setShowAssistant(true);
+              setFocusMode(false);
+            }}
+          >
+            <PanelRight size={15} /> AI 辅助
+          </button>
+          <button
+            className={`button ${focusMode ? "active" : ""}`}
+            aria-pressed={focusMode}
+            onClick={() => {
+              setFocusMode(true);
+              setShowAssistant(false);
+            }}
+          >
+            <Maximize2 size={15} /> 专注
           </button>
           {id && (
-            <Link className="button secondary" href={`/papers/${id}/translate`}>
-              双语阅读 →
+            <Link className="button" href={`/papers/${id}/translate`}>
+              <Languages size={15} /> 双语
             </Link>
           )}
         </div>
       </div>
       {error && <div className="error">{error}</div>}
       {versions.length > 0 && (
-        <div className="panel row">
-          <span>版本</span>
+        <div className="version-bar">
+          <span className="section-label">论文版本</span>
           {versions.map((v) => (
             <button
               key={v.id}
@@ -163,34 +189,39 @@ export default function Reader({
         </div>
       )}
       {version && (
-        <div className={showAssistant ? "three-col" : "reader-layout"}>
-          <aside className="panel scroll">
-            <h3>目录</h3>
-            {headings.map((x) => (
-              <button
-                key={x.id}
-                className="button ghost"
-                style={{
-                  display: "block",
-                  width: "100%",
-                  textAlign: "left",
-                  marginBottom: 5,
-                }}
-                onClick={() => jump(x)}
-              >
-                {x.text.slice(0, 85)}
-              </button>
-            ))}
-          </aside>
-          <div className="panel">
-            <div className="toolbar">
+        <div
+          className={`reader-workspace ${showAssistant && !focusMode ? "with-assistant" : ""} ${focusMode ? "focus-mode" : ""}`}
+        >
+          {!focusMode && (
+            <aside className="panel reader-outline">
+              <h3>论文目录</h3>
+              {!headings.length && (
+                <p className="muted" style={{ padding: "0 8px", fontSize: 12 }}>
+                  目录解析中，或该文档没有可识别的标题。
+                </p>
+              )}
+              {headings.map((x) => (
+                <button
+                  key={x.id}
+                  className={`outline-item ${focus === x.id ? "active" : ""}`}
+                  onClick={() => jump(x)}
+                >
+                  {x.text.slice(0, 85)}
+                </button>
+              ))}
+            </aside>
+          )}
+          <div className="panel reader-document">
+            <div className="document-toolbar">
               <button
                 className="button secondary"
                 onClick={() => goPage(Math.max(1, page - 1))}
               >
                 上一页
               </button>
-              <span>第 {page} 页</span>
+              <span className="page-indicator">
+                {page} / {activeVersion?.page_count || "—"} 页
+              </span>
               <button
                 className="button secondary"
                 onClick={() =>
@@ -218,25 +249,26 @@ export default function Reader({
               onSelectText={(text) => {
                 setSelectedText(text);
                 setShowAssistant(true);
+                setFocusMode(false);
               }}
               onCitationClick={jumpCitation}
             />
           </div>
-          {showAssistant && (
-            <aside className="stack">
+          {showAssistant && !focusMode && (
+            <aside className="reader-assistant">
               <div className="panel scroll">
                 <h3>本页内容</h3>
                 {blocks
                   .filter((x) => x.page_index === page - 1)
                   .map((x) => (
-                    <div
+                    <button
                       key={x.id}
                       className="evidence"
                       onClick={() => jump(x)}
                     >
                       <span className="badge">{x.type}</span>{" "}
                       {x.text.slice(0, 320)}
-                    </div>
+                    </button>
                   ))}
               </div>
               {selectedText && (
@@ -276,8 +308,8 @@ export default function Reader({
         </div>
       )}
       {references.length > 0 && (
-        <div className="panel">
-          <h2>参考文献</h2>
+        <details className="panel references-panel">
+          <summary>参考文献 · {references.length} 条</summary>
           <div className="list">
             {references.map((x) => (
               <button
@@ -290,7 +322,7 @@ export default function Reader({
               </button>
             ))}
           </div>
-        </div>
+        </details>
       )}
       <RunPanel runId={run} />
     </>

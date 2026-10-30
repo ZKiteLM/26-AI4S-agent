@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-import { UploadCloud, Search } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowUpRight, FileText, Search, UploadCloud } from "lucide-react";
 import { api, Paper } from "@/lib/api";
 
 type Conflict = {
@@ -12,6 +12,7 @@ type Conflict = {
   reason: string;
 };
 export default function Library() {
+  const fileInput = useRef<HTMLInputElement>(null);
   const [papers, setPapers] = useState<Paper[]>([]),
     [query, setQuery] = useState(""),
     [busy, setBusy] = useState(false),
@@ -60,24 +61,33 @@ export default function Library() {
   }
   return (
     <>
-      <div className="toolbar">
+      <div className="workspace-hero">
         <div>
           <div className="section-label">LITERATURE LIBRARY</div>
           <h1>文献库</h1>
           <p className="lead">导入、解析和组织可追溯的科研资料。</p>
         </div>
-        <label className="button">
+        <button
+          className="button"
+          type="button"
+          onClick={() => fileInput.current?.click()}
+          disabled={busy}
+        >
           <UploadCloud size={18} />
           {busy ? "上传中…" : "上传 PDF"}
-          <input
-            hidden
-            type="file"
-            accept="application/pdf"
-            multiple
-            onChange={(e) => upload(e.target.files)}
-            disabled={busy}
-          />
-        </label>
+        </button>
+        <input
+          ref={fileInput}
+          hidden
+          type="file"
+          accept="application/pdf"
+          multiple
+          onChange={(e) => {
+            upload(e.target.files);
+            e.target.value = "";
+          }}
+          disabled={busy}
+        />
       </div>
       {error && <p className="error">{error}</p>}
       {conflicts.map((c) => (
@@ -108,10 +118,11 @@ export default function Library() {
           </div>
         </div>
       ))}
-      <div className="panel row">
+      <div className="panel search-panel">
         <Search size={18} />
         <input
           className="input"
+          aria-label="搜索论文标题"
           placeholder="搜索论文标题"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -124,22 +135,31 @@ export default function Library() {
       </div>
       <div className="grid">
         {papers.map((p) => (
-          <Link href={`/papers/${p.id}`} className="card" key={p.id}>
+          <Link href={`/papers/${p.id}`} className="card paper-card" key={p.id}>
+            <FileText size={21} color="#6e86b5" aria-hidden="true" />
             <div className="section-label">
               {p.source} · {p.year || "年份未识别"}
             </div>
             <h2>{p.title}</h2>
-            <div className="row">
+            <div className="card-bottom">
               <span className="badge">
                 {p.arxiv_id ? `arXiv ${p.arxiv_id}` : "本地论文"}
               </span>
-              <span className="muted">打开阅读器 →</span>
+              <ArrowUpRight
+                className="card-arrow"
+                size={18}
+                aria-hidden="true"
+              />
             </div>
           </Link>
         ))}
       </div>
       {!papers.length && (
-        <div className="panel muted">暂无论文。上传官方 PDF 开始测试。</div>
+        <div className="panel empty-state">
+          <FileText size={34} aria-hidden="true" />
+          <h2>从第一篇论文开始</h2>
+          <p>上传 PDF 后，即可阅读原文、追踪证据并提出问题。</p>
+        </div>
       )}
     </>
   );

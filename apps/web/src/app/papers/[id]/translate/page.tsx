@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import { api, Paper } from "@/lib/api";
 import PdfCanvas from "@/components/PdfCanvas";
 
@@ -16,8 +16,8 @@ export default function Translate({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const [id, setId] = useState(""),
-    [paper, setPaper] = useState<Paper | null>(null),
+  const { id } = use(params);
+  const [paper, setPaper] = useState<Paper | null>(null),
     [blocks, setBlocks] = useState<Block[]>([]),
     [page, setPage] = useState(1),
     [pageCount, setPageCount] = useState(1),
@@ -26,16 +26,18 @@ export default function Translate({
     [error, setError] = useState(""),
     [focus, setFocus] = useState<string | null>(null);
   const translationItems = useRef<Record<string, HTMLDivElement | null>>({});
-  useEffect(() => {
-    params.then((x) => setId(x.id));
-  }, [params]);
   const version = paper?.preferred_version_id;
   useEffect(() => {
     if (!id) return;
-    api<{ paper: Paper; versions: { page_count: number }[] }>(`/papers/${id}`)
+    api<{ paper: Paper; versions: { id: string; page_count: number }[] }>(
+      `/papers/${id}`,
+    )
       .then((x) => {
         setPaper(x.paper);
-        setPageCount(x.versions[0]?.page_count || 1);
+        setPageCount(
+          x.versions.find((v) => v.id === x.paper.preferred_version_id)
+            ?.page_count || 1,
+        );
       })
       .catch((e) => setError(String(e)));
   }, [id]);
@@ -100,13 +102,17 @@ export default function Translate({
   }
   return (
     <>
-      <Link href={`/papers/${id}`} className="muted">
-        ← 返回论文
-      </Link>
-      <h1>双语对照阅读</h1>
-      <p className="lead">{paper?.title}</p>
+      <div className="reader-header">
+        <div>
+          <Link href={`/papers/${id}`} className="back-link">
+            ← 返回论文
+          </Link>
+          <h1>双语对照阅读</h1>
+          <p className="lead">{paper?.title}</p>
+        </div>
+      </div>
       {error && <p className="error">{error}</p>}
-      <div className="panel row">
+      <div className="version-bar">
         <button
           className="button secondary"
           onClick={() => {
@@ -137,27 +143,25 @@ export default function Translate({
         </button>
       </div>
       {version && (
-        <div className="two-col">
+        <div className="translation-workspace">
           <PdfCanvas
             versionId={version}
             page={page}
             bbox={current.find((x) => x.id === focus)?.bbox}
             onLocationClick={selectPdfLocation}
           />
-          <div className="panel scroll">
+          <div className="panel translation-panel">
             <h2>中文译文</h2>
+            {!current.length && (
+              <p className="muted">此页暂无可翻译的文本块。</p>
+            )}
             {current.map((x) => (
               <div
                 key={x.id}
                 ref={(node) => {
                   translationItems.current[x.id] = node;
                 }}
-                className="list-item"
-                style={{
-                  marginBottom: 10,
-                  borderColor: focus === x.id ? "#245fbd" : undefined,
-                  cursor: "pointer",
-                }}
+                className={`list-item translation-item ${focus === x.id ? "active" : ""}`}
                 onClick={() => setFocus(x.id)}
               >
                 <div className="section-label">{x.type}</div>
