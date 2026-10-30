@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { nearestBlock, ReaderBlock } from "@/lib/reader";
+import { nearestBlock, pdfPageAtAnchor, ReaderBlock } from "@/lib/reader";
 
 type Options = {
   pdfRef: React.RefObject<HTMLDivElement | null>;
@@ -87,21 +87,16 @@ export function useBilingualSync({
     const syncFromPdf = () => {
       frame.current = 0;
       if (Date.now() < pausePdfSyncUntil.current) return;
-      const root = pdf.getBoundingClientRect();
-      const anchorY = root.top + root.height * ANCHOR;
-      const element = document.elementFromPoint(
-        root.left + root.width / 2,
-        anchorY,
-      );
-      const page = element?.closest<HTMLElement>("[data-page-index]");
-      if (!page) return;
+      const anchor = pdfPageAtAnchor(pdf, ANCHOR);
+      if (!anchor) return;
+      const page = anchor.page;
       const pageIndex = Number(page.dataset.pageIndex);
       onPageChange(pageIndex);
       onNeedPage(pageIndex);
       const blocks = blocksByPage[pageIndex];
       if (!blocks?.length) return;
       const rect = page.getBoundingClientRect();
-      const y = Math.max(0, Math.min(1, (anchorY - rect.top) / rect.height));
+      const y = anchor.fraction;
       const x =
         pointerX.current === null
           ? 0.25

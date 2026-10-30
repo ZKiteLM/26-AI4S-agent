@@ -9,14 +9,15 @@ import BilingualPane from "@/components/BilingualPane";
 import ContinuousPdfViewer from "@/components/ContinuousPdfViewer";
 import MathMarkdown from "@/components/MathMarkdown";
 import RunPanel from "@/components/RunPanel";
-import { ReaderBlock } from "@/lib/reader";
+import { pdfPageAtAnchor, ReaderBlock } from "@/lib/reader";
 import {
   BookOpenText,
   Languages,
-  Maximize2,
   PanelLeftClose,
+  PanelLeftOpen,
   PanelRight,
   RefreshCw,
+  RotateCcw,
 } from "lucide-react";
 
 type Version = {
@@ -50,8 +51,8 @@ export default function Reader({
   const [focusId, setFocusId] = useState<string | null>(null);
   const [rightMode, setRightMode] = useState<RightMode>("none");
   const [aiOpen, setAiOpen] = useState(false);
-  const [focusMode, setFocusMode] = useState(false);
   const [outlineOpen, setOutlineOpen] = useState(true);
+  const [resetToken, setResetToken] = useState(0);
   const [outlineView, setOutlineView] = useState<"outline" | "thumbnails">(
     "outline",
   );
@@ -86,11 +87,9 @@ export default function Reader({
       if (panel === "selection" || panel === "bilingual") setRightMode(panel);
       else if (legacy === "bilingual") setRightMode("bilingual");
       else if (legacy === "assistant") {
-        setRightMode("selection");
         setAiOpen(true);
       }
       setAiOpen((previous) => previous || url.searchParams.get("ai") === "1");
-      setFocusMode(url.searchParams.get("focus") === "1" || legacy === "focus");
       setOutlineOpen(
         window.localStorage.getItem("reader-outline-open") !== "false",
       );
@@ -151,7 +150,6 @@ export default function Reader({
     nextFocus: string | null = focusId,
     nextPanel = rightMode,
     nextAi = aiOpen,
-    nextFocusMode = focusMode,
   ) {
     const url = new URL(window.location.href);
     url.searchParams.set("page", String(nextPage));
@@ -162,27 +160,45 @@ export default function Reader({
     else url.searchParams.set("panel", nextPanel);
     if (nextAi) url.searchParams.set("ai", "1");
     else url.searchParams.delete("ai");
-    if (nextFocusMode) url.searchParams.set("focus", "1");
-    else url.searchParams.delete("focus");
+    url.searchParams.delete("focus");
     window.history.replaceState(null, "", url.pathname + url.search);
+  }
+  function keepPdfPosition(change: () => void) {
+    const container = pdfRef.current;
+    const anchor = container ? pdfPageAtAnchor(container) : null;
+    const pageIndex = anchor?.page.dataset.pageIndex;
+    change();
+    if (!container || !anchor || pageIndex === undefined) return;
+    requestAnimationFrame(() => {
+      const next = container.querySelector<HTMLElement>(
+        `[data-page-index="${pageIndex}"]`,
+      );
+      if (next)
+        container.scrollTop =
+          next.offsetTop +
+          anchor.fraction * next.clientHeight -
+          container.clientHeight * 0.3;
+    });
   }
   function toggleRight(next: Exclude<RightMode, "none">) {
     const value = rightMode === next ? "none" : next;
-    setRightMode(value);
-    setBilingualFocus(null);
-    updateUrl(page, focusId, value);
+    keepPdfPosition(() => {
+      setRightMode(value);
+      setBilingualFocus(null);
+      updateUrl(page, focusId, value);
+    });
   }
   function toggleAi() {
-    setAiOpen(!aiOpen);
-    updateUrl(page, focusId, rightMode, !aiOpen);
-  }
-  function toggleFocus() {
-    setFocusMode(!focusMode);
-    updateUrl(page, focusId, rightMode, aiOpen, !focusMode);
+    keepPdfPosition(() => {
+      setAiOpen(!aiOpen);
+      updateUrl(page, focusId, rightMode, !aiOpen);
+    });
   }
   function changeOutline(open: boolean) {
-    setOutlineOpen(open);
-    window.localStorage.setItem("reader-outline-open", String(open));
+    keepPdfPosition(() => {
+      setOutlineOpen(open);
+      window.localStorage.setItem("reader-outline-open", String(open));
+    });
   }
   function goPage(next: number, blockId: string | null = null) {
     const target = Math.max(1, Math.min(activeVersion?.page_count || 1, next));
@@ -370,7 +386,7 @@ export default function Reader({
       </div>
     </section>
   );
-  const right = !focusMode && (rightMode !== "none" || aiOpen) && version && (
+  const right = (rightMode !== "none" || aiOpen) && version && (
     <aside className={`reader-side-stack ${aiOpen ? "with-ai" : ""}`}>
       {selectionPanel}
       {rightMode === "bilingual" && (
@@ -460,6 +476,23 @@ export default function Reader({
               >
                 下一页
               </button>
+              {!outlineOpen && (
+                <button
+                  className="button ghost"
+                  onClick={() => changeOutline(true)}
+                >
+                  <PanelLeftOpen size={15} /> 显示文献大纲
+                </button>
+              )}
+              <button
+                className="button ghost"
+                onClick={() =>
+                  keepPdfPosition(() => setResetToken((value) => value + 1))
+                }
+                title="恢复默认面板比例"
+              >
+                <RotateCcw size={14} /> 恢复默认比例
+              </button>
               {returnPage && (
                 <button
                   className="button ghost"
@@ -478,42 +511,32 @@ export default function Reader({
               aria-label="阅读工具"
             >
               <button
-                className={`button ${rightMode === "selection" && !focusMode ? "active" : "ghost"}`}
-                aria-pressed={rightMode === "selection" && !focusMode}
-                disabled={focusMode}
+                className={`button ${rightMode === "selection" ? "active" : "ghost"}`}
+                aria-pressed={rightMode === "selection"}
                 onClick={() => toggleRight("selection")}
               >
                 <BookOpenText size={15} /> 划词翻译
               </button>
               <button
-                className={`button ${rightMode === "bilingual" && !focusMode ? "active" : "ghost"}`}
-                aria-pressed={rightMode === "bilingual" && !focusMode}
-                disabled={focusMode}
+                className={`button ${rightMode === "bilingual" ? "active" : "ghost"}`}
+                aria-pressed={rightMode === "bilingual"}
                 onClick={() => toggleRight("bilingual")}
               >
                 <Languages size={15} /> 双语滚动
               </button>
               <button
-                className={`button ${aiOpen && !focusMode ? "active" : "ghost"}`}
-                aria-pressed={aiOpen && !focusMode}
-                disabled={focusMode}
+                className={`button ${aiOpen ? "active" : "ghost"}`}
+                aria-pressed={aiOpen}
                 onClick={toggleAi}
               >
                 <PanelRight size={15} /> AI 问答
-              </button>
-              <button
-                className={`button ${focusMode ? "active" : "ghost"}`}
-                aria-pressed={focusMode}
-                onClick={toggleFocus}
-              >
-                <Maximize2 size={15} /> 专注
               </button>
             </div>
           </div>
           <ReaderColumns
             outline={outline}
             outlineOpen={outlineOpen}
-            onOutlineOpen={() => changeOutline(true)}
+            resetToken={resetToken}
             center={
               <ContinuousPdfViewer
                 versionId={version}
@@ -532,18 +555,17 @@ export default function Reader({
                       : null
                 }
                 onPageChange={(index) => setPage(index + 1)}
-                onSelectText={(text) => {
-                  if (focusMode || rightMode === "bilingual") return;
-                  setSelectedText(text);
-                  setTranslatedText("");
-                  if (rightMode === "none") {
-                    setRightMode("selection");
-                    updateUrl(page, focusId, "selection");
-                  }
-                }}
+                onSelectText={
+                  rightMode === "selection"
+                    ? (text) => {
+                        setSelectedText(text);
+                        setTranslatedText("");
+                      }
+                    : undefined
+                }
                 onCitationClick={jumpCitation}
                 onLocationClick={(pageIndex, x, y) => {
-                  if (rightMode !== "bilingual" || focusMode) return;
+                  if (rightMode !== "bilingual") return;
                   setPdfClick((previous) => ({
                     pageIndex,
                     x,

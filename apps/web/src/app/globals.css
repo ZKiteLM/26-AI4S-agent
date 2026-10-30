@@ -1527,18 +1527,6 @@ h3 {
 .main-reader {
   padding-inline: 20px;
 }
-.reader-columns-tools {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  min-height: 34px;
-  margin-bottom: 8px;
-}
-.reader-columns-tools .button {
-  min-height: 30px;
-  padding: 4px 9px;
-  font-size: 12px;
-}
 .reader-columns {
   display: grid;
   align-items: start;
@@ -1830,11 +1818,6 @@ body:has(.paper-reader-page),
   flex: 1;
   min-height: 0;
 }
-.paper-reader-page .reader-columns-tools {
-  min-height: 30px;
-  margin-bottom: 4px;
-  flex: none;
-}
 .paper-reader-page .reader-columns {
   position: relative;
   flex: 1;
@@ -1939,10 +1922,18 @@ body:has(.paper-reader-page),
     display: grid;
   }
   .paper-reader-page .reader-columns.has-right.has-outline {
-    grid-template-columns: 220px 8px minmax(0, 1fr) !important;
+    grid-template-columns: 220px minmax(0, 1fr) !important;
+  }
+  .paper-reader-page .reader-columns.has-right.has-outline .reader-center {
+    grid-column: 2;
   }
   .paper-reader-page .reader-columns.has-right:not(.has-outline) {
     grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .paper-reader-page
+    .reader-columns.has-right:not(.has-outline)
+    .reader-center {
+    grid-column: 1;
   }
   .paper-reader-page .reader-columns.has-right .reader-column.reader-right {
     position: absolute;
@@ -1966,6 +1957,9 @@ body:has(.paper-reader-page),
   .paper-reader-page .reader-columns.has-right.has-outline {
     display: grid;
     grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .paper-reader-page .reader-columns.has-right.has-outline .reader-center {
+    grid-column: 1;
   }
   .paper-reader-page .reader-columns.has-outline .reader-column:first-child {
     position: absolute;

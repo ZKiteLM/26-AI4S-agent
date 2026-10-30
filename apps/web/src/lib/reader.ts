@@ -9,6 +9,27 @@ export type ReaderBlock = {
   bbox: number[];
 };
 
+export function pdfPageAtAnchor(container: HTMLElement, fraction = 0.3) {
+  const root = container.getBoundingClientRect();
+  const y = root.top + root.height * fraction;
+  let closest: { page: HTMLElement; fraction: number } | null = null;
+  let distance = Infinity;
+  for (const page of container.querySelectorAll<HTMLElement>(
+    ".continuous-pdf-page",
+  )) {
+    const rect = page.getBoundingClientRect();
+    const next = Math.max(rect.top - y, 0, y - rect.bottom);
+    if (next < distance) {
+      closest = {
+        page,
+        fraction: Math.max(0, Math.min(1, (y - rect.top) / rect.height)),
+      };
+      distance = next;
+    }
+  }
+  return closest;
+}
+
 export function nearestBlock(
   blocks: ReaderBlock[],
   x: number,

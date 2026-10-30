@@ -1,14 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { PanelLeftOpen, RotateCcw } from "lucide-react";
 
 type Props = {
   outline: React.ReactNode;
   center: React.ReactNode;
   right?: React.ReactNode;
   outlineOpen: boolean;
-  onOutlineOpen: () => void;
+  resetToken: number;
 };
 
 const DEFAULT_OUTLINE = 220;
@@ -19,7 +18,7 @@ export default function ReaderColumns({
   center,
   right,
   outlineOpen,
-  onOutlineOpen,
+  resetToken,
 }: Props) {
   const root = useRef<HTMLDivElement>(null);
   const [outlineWidth, setOutlineWidth] = useState(DEFAULT_OUTLINE);
@@ -46,6 +45,16 @@ export default function ReaderColumns({
     });
     return () => cancelAnimationFrame(frame);
   }, []);
+
+  useEffect(() => {
+    if (!resetToken) return;
+    const frame = requestAnimationFrame(() => {
+      setOutlineWidth(DEFAULT_OUTLINE);
+      setRightWidth(DEFAULT_RIGHT);
+      window.localStorage.removeItem("reader-panel-widths");
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [resetToken]);
 
   function update(which: "outline" | "right", width: number) {
     const total = root.current?.clientWidth || 1200;
@@ -100,12 +109,6 @@ export default function ReaderColumns({
     handle.addEventListener("pointercancel", stop);
   }
 
-  function reset() {
-    setOutlineWidth(DEFAULT_OUTLINE);
-    setRightWidth(DEFAULT_RIGHT);
-    window.localStorage.removeItem("reader-panel-widths");
-  }
-
   const hasRight = Boolean(right);
   const columns = [
     ...(outlineOpen ? [`${outlineWidth}px`, "8px"] : []),
@@ -115,20 +118,6 @@ export default function ReaderColumns({
 
   return (
     <div className="reader-columns-wrap">
-      <div className="reader-columns-tools">
-        {!outlineOpen && (
-          <button className="button ghost" onClick={onOutlineOpen}>
-            <PanelLeftOpen size={15} /> 显示文献大纲
-          </button>
-        )}
-        <button
-          className="button ghost"
-          onClick={reset}
-          title="恢复默认面板比例"
-        >
-          <RotateCcw size={14} /> 恢复默认比例
-        </button>
-      </div>
       <div
         className={`reader-columns ${hasRight ? "has-right" : ""} ${outlineOpen ? "has-outline" : ""}`}
         ref={root}

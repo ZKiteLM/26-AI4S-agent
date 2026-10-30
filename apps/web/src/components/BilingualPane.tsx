@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
-import { nearestBlock, ReaderBlock } from "@/lib/reader";
+import { nearestBlock, pdfPageAtAnchor, ReaderBlock } from "@/lib/reader";
 import TranslationViewer from "@/components/TranslationViewer";
 import { useBilingualSync } from "@/hooks/useBilingualSync";
 
@@ -122,21 +122,12 @@ export default function BilingualPane({
     const pdf = pdfRef.current;
     const translation = translationRef.current;
     if (!pdf || !translation) return;
-    const root = pdf.getBoundingClientRect();
-    const anchorY = root.top + root.height * 0.3;
-    const pageNode = document
-      .elementFromPoint(root.left + root.width / 2, anchorY)
-      ?.closest<HTMLElement>("[data-page-index]");
-    if (!pageNode) return;
-    const index = Number(pageNode.dataset.pageIndex);
+    const anchor = pdfPageAtAnchor(pdf);
+    if (!anchor) return;
+    const index = Number(anchor.page.dataset.pageIndex);
     const blocks = blocksByPage[index];
     if (!blocks?.length) return;
-    const rect = pageNode.getBoundingClientRect();
-    const block = nearestBlock(
-      blocks,
-      0.25,
-      Math.max(0, Math.min(1, (anchorY - rect.top) / rect.height)),
-    );
+    const block = nearestBlock(blocks, 0.25, anchor.fraction);
     if (!block || !translation.querySelector(`[data-block-id="${block.id}"]`))
       return;
     scrollToTranslation(block);

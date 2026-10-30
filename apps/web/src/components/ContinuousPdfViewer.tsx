@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { apiFile } from "@/lib/api";
 import { citationAtPoint } from "@/lib/citations";
+import { pdfPageAtAnchor } from "@/lib/reader";
 
 type PdfDocument = import("pdfjs-dist").PDFDocumentProxy;
 type PdfPage = import("pdfjs-dist").PDFPageProxy;
@@ -271,12 +272,7 @@ export default function ContinuousPdfViewer({
   function updatePage() {
     const container = scrollRef.current;
     if (!container) return;
-    const rect = container.getBoundingClientRect();
-    const element = window.document.elementFromPoint(
-      rect.left + rect.width / 2,
-      rect.top + rect.height * 0.3,
-    );
-    const page = element?.closest<HTMLElement>("[data-page-index]");
+    const page = pdfPageAtAnchor(container)?.page;
     if (!page) return;
     const index = Number(page.dataset.pageIndex);
     if (index !== currentPage.current) {
