@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   BookOpenText,
   ChartNoAxesCombined,
@@ -12,6 +12,8 @@ import {
   ListTodo,
   Menu,
   Network,
+  PanelLeftClose,
+  PanelLeftOpen,
   Sparkles,
   Terminal,
   X,
@@ -43,6 +45,21 @@ const groups = [
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() =>
+      setCollapsed(
+        window.localStorage.getItem("app-sidebar-collapsed") === "true",
+      ),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  function toggleSidebar() {
+    setCollapsed((previous) => {
+      window.localStorage.setItem("app-sidebar-collapsed", String(!previous));
+      return !previous;
+    });
+  }
 
   if (pathname === "/login")
     return <main className="auth-main">{children}</main>;
@@ -69,7 +86,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           onClick={() => setMenuOpen(false)}
         />
       )}
-      <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
+      <aside
+        className={`sidebar ${menuOpen ? "sidebar-open" : ""} ${collapsed ? "sidebar-collapsed" : ""}`}
+      >
         <div className="sidebar-head">
           <Link
             href="/library"
@@ -91,6 +110,19 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           >
             <X size={19} />
           </button>
+          <button
+            className="icon-button sidebar-toggle"
+            aria-label={collapsed ? "展开导航栏" : "收起导航栏"}
+            title={collapsed ? "展开导航栏" : "收起导航栏"}
+            aria-expanded={!collapsed}
+            onClick={toggleSidebar}
+          >
+            {collapsed ? (
+              <PanelLeftOpen size={18} />
+            ) : (
+              <PanelLeftClose size={18} />
+            )}
+          </button>
         </div>
 
         <nav aria-label="主导航" className="sidebar-nav">
@@ -107,6 +139,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                     href={href}
                     className={`nav-link ${active ? "active" : ""}`}
                     aria-current={active ? "page" : undefined}
+                    title={label}
                     onClick={() => setMenuOpen(false)}
                   >
                     <Icon size={18} strokeWidth={1.8} aria-hidden="true" />

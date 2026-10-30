@@ -47,6 +47,7 @@ export default function PdfCanvas({
         const blob = await apiFile(`/versions/${versionId}/file`);
         loadingTask = pdfjs.getDocument({
           data: new Uint8Array(await blob.arrayBuffer()),
+          wasmUrl: "/pdfjs/wasm/",
         });
         const pdf = await loadingTask.promise;
         if (!cancelled) {

@@ -211,32 +211,85 @@ def _mineru_blocks(pdf_data: bytes, start: int, end: int, ocr_mode: str = "ocr")
     for page in content.get("pages", []):
         index = page.get("page_idx", start)
         for item in page.get("blocks", []):
-            raw = item.get("content", "")
-            text = raw if isinstance(raw, str) else str(raw)
-            if not text.strip():
-                continue
             kind = item.get("type", "text")
             kind = {
                 "text": "paragraph",
                 "doc_title": "title",
                 "paragraph_title": "heading",
                 "ref_text": "reference",
+                "interline_equation": "equation",
+                "equation_interline": "equation",
             }.get(kind, kind)
+            raw = item.get("content", "")
+            markdown = _mineru_markdown(raw)
+            latex = None
+            if kind == "equation":
+                latex = str(
+                    item.get("latex") or item.get("math_content") or _mineru_formula(raw)
+                ).strip()
+                latex = _strip_math_delimiters(latex)
+                markdown = f"$$\n{latex}\n$$" if latex else markdown
+            text = latex or markdown
+            if not text.strip():
+                continue
+            bbox = item.get("bbox") or [0, 0, 1, 1]
+            if len(bbox) == 4 and max(bbox) > 1:
+                bbox = [coordinate / 1000 for coordinate in bbox]
             output.append(
                 {
                     "page_index": index,
                     "order": len(output),
                     "type": kind,
                     "text": text,
-                    "markdown": text,
-                    "latex": text if kind == "equation" else None,
-                    "bbox": item.get("bbox") or [0, 0, 1, 1],
+                    "markdown": markdown,
+                    "latex": latex,
+                    "bbox": bbox,
                     "section_path": [],
                     "parser": "mineru",
                     "confidence": None,
                 }
             )
     return output
+
+
+def _strip_math_delimiters(value: str) -> str:
+    for left, right in (("$$", "$$"), (r"\[", r"\]"), ("$", "$"), (r"\(", r"\)")):
+        if value.startswith(left) and value.endswith(right):
+            value = value[len(left) : -len(right)].strip()
+            break
+    return re.sub(r"\\\\(?=[A-Za-z])", r"\\", value)
+
+
+def _mineru_formula(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        direct = value.get("latex") or value.get("math_content")
+        if isinstance(direct, str):
+            return direct
+        return _mineru_formula(value.get("content") or value.get("spans") or "")
+    if isinstance(value, list):
+        return " ".join(filter(None, (_mineru_formula(part) for part in value)))
+    return ""
+
+
+def _mineru_markdown(value: object) -> str:
+    if isinstance(value, str):
+        return re.sub(
+            r"\$([^$\n]+)\$",
+            lambda match: "$" + _strip_math_delimiters(match.group(1)) + "$",
+            value,
+        )
+    if isinstance(value, list):
+        return " ".join(filter(None, (_mineru_markdown(part) for part in value)))
+    if isinstance(value, dict):
+        kind = value.get("type")
+        if kind in ("inline_equation", "equation_inline"):
+            formula = _strip_math_delimiters(_mineru_formula(value))
+            return f"${formula}$" if formula else ""
+        direct = value.get("text") or value.get("content") or value.get("spans")
+        return _mineru_markdown(direct) if direct is not None else ""
+    return ""
 
 
 def parse_pdf(data: bytes, progress: Callable[[int, int], None] | None = None) -> list[dict]:

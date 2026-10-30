@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+from collections import defaultdict, deque
 
 from celery import Celery
 from langgraph.graph import END, START, StateGraph
@@ -57,11 +58,34 @@ def parse_version(task_id: str, version_id: str) -> None:
     with SessionLocal() as db:
         task = db.get(BackgroundTask, task_id)
         version = db.get(Version, version_id)
+        had_blocks = (
+            db.scalar(select(Block.id).where(Block.version_id == version_id).limit(1)) is not None
+        )
         task.status = version.parse_status = "running"
         db.commit()
         record("parser", "INFO", "开始解析 PDF", task_id=task_id, version_id=version_id)
         try:
             data = Storage().get(version.file_key)
+
+            def progress(done: int, total: int) -> None:
+                task.progress = done / total
+                db.commit()
+                record("parser", "INFO", "解析页进度", task_id=task_id, done=done, total=total)
+
+            parsed = parse_pdf(data, progress)
+            previous = defaultdict(deque)
+            seen_old_ids = set()
+            for old, translated in db.execute(
+                select(Block, Translation)
+                .join(Translation, Translation.block_id == Block.id)
+                .where(Block.version_id == version_id)
+                .order_by(Block.page_index, Block.order)
+            ):
+                key = (old.page_index, old.type, old.markdown or old.text)
+                if old.id not in seen_old_ids:
+                    previous[key].append([])
+                    seen_old_ids.add(old.id)
+                previous[key][-1].append((translated.target_lang, translated.text))
             remove_version_index(version_id)
             db.execute(delete(Chunk).where(Chunk.version_id == version_id))
             db.execute(
@@ -70,15 +94,16 @@ def parse_version(task_id: str, version_id: str) -> None:
                 )
             )
             db.execute(delete(Block).where(Block.version_id == version_id))
-            db.commit()
-
-            def progress(done: int, total: int) -> None:
-                task.progress = done / total
-                db.commit()
-                record("parser", "INFO", "解析页进度", task_id=task_id, done=done, total=total)
-
-            parsed = parse_pdf(data, progress)
-            db.add_all(Block(version_id=version_id, **block) for block in parsed)
+            new_blocks = [Block(version_id=version_id, **block) for block in parsed]
+            db.add_all(new_blocks)
+            db.flush()
+            restored = 0
+            for block in new_blocks:
+                matches = previous.get((block.page_index, block.type, block.markdown or block.text))
+                if matches:
+                    for language, text in matches.popleft():
+                        db.add(Translation(block_id=block.id, target_lang=language, text=text))
+                        restored += 1
             db.commit()
             chunks = make_chunks(db, version_id)
             paper = db.get(Paper, version.paper_id)
@@ -94,11 +119,14 @@ def parse_version(task_id: str, version_id: str) -> None:
                 },
                 "equations": sum(block["type"] == "equation" for block in parsed),
                 "tables": sum(block["type"] == "table" for block in parsed),
+                "translations_preserved": restored,
             }
             task.progress = 1
             record("parser", "INFO", "PDF 解析与索引完成", task_id=task_id, **task.result)
         except Exception as exc:
-            task.status = version.parse_status = "failed"
+            db.rollback()
+            task.status = "failed"
+            version.parse_status = "completed" if had_blocks else "failed"
             task.error = str(exc)[:1000]
             record("parser", "ERROR", "PDF 解析失败", task_id=task_id, error=task.error)
         db.commit()

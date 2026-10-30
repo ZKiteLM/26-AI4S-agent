@@ -13,6 +13,7 @@ type Props = {
   focus: { pageIndex: number; bbox: number[] } | null;
   onPageChange: (pageIndex: number) => void;
   onLocationClick: (pageIndex: number, x: number, y: number) => void;
+  initialPage?: number;
 };
 
 function Page({
@@ -149,6 +150,7 @@ export default function ContinuousPdfViewer({
   focus,
   onPageChange,
   onLocationClick,
+  initialPage = 1,
 }: Props) {
   const [document, setDocument] = useState<PdfDocument | null>(null);
   const [count, setCount] = useState(pageCount);
@@ -197,6 +199,13 @@ export default function ContinuousPdfViewer({
     observer.observe(container);
     return () => observer.disconnect();
   }, [scrollRef]);
+
+  useEffect(() => {
+    if (!document || initialPage <= 1) return;
+    const target = nodes.current[initialPage - 1];
+    const container = scrollRef.current;
+    if (target && container) container.scrollTop = target.offsetTop;
+  }, [document, initialPage, scrollRef]);
 
   useEffect(() => {
     const container = scrollRef.current;

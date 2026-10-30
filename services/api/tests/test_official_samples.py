@@ -16,7 +16,7 @@ os.environ["PARSER_VECTOR_ENHANCE"] = "0"
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -24,9 +24,14 @@ from services.api.app.charts import render_chart
 from services.api.app.db import Base, SessionLocal
 from services.api.app.graphs import build_graph
 from services.api.app.main import app
-from services.api.app.models import Block, Paper, Translation, Version
-from services.api.app.parsing import _pymupdf_blocks, identify_pdf, parse_pdf
-from services.api.app.translation import protect_math, restore_math
+from services.api.app.models import BackgroundTask, Block, Paper, Translation, Version
+from services.api.app.parsing import (
+    _mineru_markdown,
+    _pymupdf_blocks,
+    identify_pdf,
+    parse_pdf,
+)
+from services.api.app.translation import protect_math, restore_math, translate_text
 from services.api.app.worker import _compose, _verify
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -81,6 +86,28 @@ def test_inline_math_is_restored_without_model_changes():
         restore_math("公式被遗漏", formulas)
 
 
+def test_mineru_inline_formula_becomes_markdown_math():
+    assert (
+        _mineru_markdown(
+            [
+                {"type": "text", "content": "where"},
+                {"type": "inline_equation", "content": {"latex": r"x^2 + y^2"}},
+                {"type": "text", "content": "is constant"},
+            ]
+        )
+        == "where $x^2 + y^2$ is constant"
+    )
+    assert _mineru_markdown(r"Use $\\sqrt{x}$ here") == r"Use $\sqrt{x}$ here"
+
+
+def test_selection_translation_preserves_formula(monkeypatch):
+    monkeypatch.setattr(
+        "services.api.app.translation.generate",
+        lambda _instruction, prompt: prompt.split("\n", 1)[1].replace("where", "其中"),
+    )
+    assert translate_text("where $x^2$ is fixed", "zh") == "其中 $x^2$ is fixed"
+
+
 def test_reader_loads_one_page_and_its_cached_translations():
     with TestClient(app) as client:
         login = client.post(
@@ -122,6 +149,78 @@ def test_reader_loads_one_page_and_its_cached_translations():
             ).status_code
             == 400
         )
+
+
+def test_reparse_keeps_unchanged_translation_and_previous_blocks_on_failure(monkeypatch):
+    from services.api.app import worker
+
+    with SessionLocal() as db:
+        paper = Paper(owner_id="demo@example.com", title="Reparse fixture")
+        db.add(paper)
+        db.flush()
+        version = Version(
+            paper_id=paper.id,
+            filename="fixture.pdf",
+            file_key="fixture.pdf",
+            sha256="reparse-fixture",
+            parse_status="completed",
+        )
+        db.add(version)
+        db.flush()
+        old = Block(
+            version_id=version.id,
+            page_index=0,
+            order=0,
+            text="Same paragraph",
+            markdown="Same paragraph",
+        )
+        db.add(old)
+        db.flush()
+        db.add(Translation(block_id=old.id, target_lang="zh", text="相同段落"))
+        task = BackgroundTask(owner_id="demo@example.com", type="parse_pdf")
+        db.add(task)
+        db.commit()
+        version_id, task_id, old_id = version.id, task.id, old.id
+
+    monkeypatch.setattr(worker.Storage, "get", lambda _self, _key: b"%PDF")
+    monkeypatch.setattr(worker, "remove_version_index", lambda _version_id: None)
+    monkeypatch.setattr(worker, "make_chunks", lambda _db, _version_id: [])
+    monkeypatch.setattr(worker, "index_chunks", lambda *_args: None)
+    parsed = [
+        {
+            "page_index": 0,
+            "order": 0,
+            "type": "paragraph",
+            "text": "Same paragraph",
+            "markdown": "Same paragraph",
+            "bbox": [0.1, 0.1, 0.9, 0.2],
+        }
+    ]
+    monkeypatch.setattr(worker, "parse_pdf", lambda _data, _progress: parsed)
+    worker.parse_version.run(task_id, version_id)
+    with SessionLocal() as db:
+        replacement = db.scalars(select(Block).where(Block.version_id == version_id)).one()
+        assert replacement.id != old_id
+        assert (
+            db.scalars(select(Translation).where(Translation.block_id == replacement.id)).one().text
+            == "相同段落"
+        )
+        failed_task = BackgroundTask(owner_id="demo@example.com", type="parse_pdf")
+        db.add(failed_task)
+        db.commit()
+        failed_task_id = failed_task.id
+        replacement_id = replacement.id
+
+    monkeypatch.setattr(
+        worker,
+        "parse_pdf",
+        lambda _data, _progress: (_ for _ in ()).throw(RuntimeError("parser failed")),
+    )
+    worker.parse_version.run(failed_task_id, version_id)
+    with SessionLocal() as db:
+        assert db.get(Version, version_id).parse_status == "completed"
+        assert db.get(Block, replacement_id) is not None
+        assert db.get(BackgroundTask, failed_task_id).status == "failed"
 
 
 def test_version_conflict_requires_user_resolution(monkeypatch):
@@ -344,7 +443,13 @@ def test_remote_parser_adapter_preserves_equation_and_location(monkeypatch):
         "pages": [
             {
                 "page_idx": 0,
-                "blocks": [{"type": "equation", "content": "E=mc^2", "bbox": [0.1, 0.2, 0.6, 0.3]}],
+                "blocks": [
+                    {
+                        "type": "interline_equation",
+                        "content": {"latex": "E=mc^2"},
+                        "bbox": [100, 200, 600, 300],
+                    }
+                ],
             }
         ]
     }
@@ -374,6 +479,7 @@ def test_remote_parser_adapter_preserves_equation_and_location(monkeypatch):
     monkeypatch.setattr(parsing.httpx, "post", lambda *args, **kwargs: Response())
     blocks = parsing._mineru_blocks(b"%PDF", 0, 1, "auto")
     assert blocks[0]["latex"] == "E=mc^2"
+    assert blocks[0]["markdown"] == "$$\nE=mc^2\n$$"
     assert blocks[0]["bbox"] == [0.1, 0.2, 0.6, 0.3]
 
 

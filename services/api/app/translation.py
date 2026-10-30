@@ -32,6 +32,22 @@ def restore_math(text: str, formulas: list[str]) -> str:
     return text
 
 
+def translate_text(source: str, target_lang: str) -> str:
+    masked, formulas = protect_math(source)
+    instruction = (
+        "Translate academic text accurately. Preserve every __MATH_N__ token exactly once. "
+        "Write any new mathematical notation in LaTeX using $...$ or $$...$$ Markdown delimiters. "
+        "Return only the translated Markdown."
+    )
+    for _ in range(2):
+        answer = generate(instruction, f"Translate to {target_lang}:\n{masked}")
+        try:
+            return restore_math(answer, formulas)
+        except ValueError:
+            continue
+    raise ValueError("Translation did not preserve mathematical notation")
+
+
 def translate_blocks(db: Session, blocks: list[Block], target_lang: str) -> list[dict]:
     cached = {
         item.block_id: item
@@ -53,6 +69,7 @@ def translate_blocks(db: Session, blocks: list[Block], target_lang: str) -> list
             answer = generate(
                 "Translate academic Markdown faithfully. Preserve Markdown structure, citations, "
                 "code, and every __MATH_N__ token exactly once. "
+                "Write any new mathematical notation as LaTeX in $...$ or $$...$$. "
                 "Return only a JSON object mapping each supplied id to its translation.",
                 f"Target language: {target_lang}\nSegments: {json.dumps(source, ensure_ascii=False)}",
                 max_tokens=1800,
@@ -70,7 +87,8 @@ def translate_blocks(db: Session, blocks: list[Block], target_lang: str) -> list
             elif not isinstance(text, str) or not text.strip():
                 text = generate(
                     "Translate academic Markdown faithfully. Keep citations, code, and every "
-                    "__MATH_N__ token exactly once. Return only the translation.",
+                    "__MATH_N__ token exactly once. Write new formulas in LaTeX Markdown. "
+                    "Return only the translation.",
                     f"Translate to {target_lang}:\n{protected[block.id][0]}",
                 )
             if block.type not in ("equation", "code"):

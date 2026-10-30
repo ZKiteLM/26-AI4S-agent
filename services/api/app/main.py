@@ -39,7 +39,7 @@ from .observability import record
 from .parsing import identify_pdf, similarity
 from .retrieval import remove_version_index
 from .storage import Storage
-from .translation import translate_blocks
+from .translation import translate_blocks, translate_text
 from .worker import celery_app, parse_version, refresh_subscriptions, run_agent
 
 
@@ -649,12 +649,7 @@ async def run_events(
 @app.post(API + "/translate")
 def translate(data: TranslateIn, user: str = Depends(current_user), db: Session = Depends(get_db)):
     if data.text:
-        return {
-            "text": generate(
-                "Translate academic text accurately. Preserve formulas and code.",
-                f"Translate to {data.target_lang}:\n{data.text}",
-            )
-        }
+        return {"text": translate_text(data.text, data.target_lang)}
     if not data.version_id or not data.block_ids:
         raise HTTPException(400, "version_id and block_ids or text required")
     owned_version(db, data.version_id, user)
