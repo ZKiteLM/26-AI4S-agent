@@ -24,8 +24,9 @@ from services.api.app.charts import render_chart
 from services.api.app.db import Base, SessionLocal
 from services.api.app.graphs import build_graph
 from services.api.app.main import app
-from services.api.app.models import Paper, Version
+from services.api.app.models import Block, Paper, Translation, Version
 from services.api.app.parsing import _pymupdf_blocks, identify_pdf, parse_pdf
+from services.api.app.translation import protect_math, restore_math
 from services.api.app.worker import _compose, _verify
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -55,6 +56,72 @@ def test_permission_notice_is_not_the_paper_title():
     blocks = _pymupdf_blocks(doc[0], 0, 0)
     titles = [block["text"] for block in blocks if block["type"] == "title"]
     assert titles == ["Attention Is All You Need"]
+
+
+def test_two_column_page_keeps_each_column_in_reading_order():
+    import pymupdf
+
+    document = pymupdf.open()
+    page = document.new_page(width=600, height=800)
+    page.insert_text((50, 80), "Synthetic Paper", fontsize=18)
+    for index in range(3):
+        page.insert_text((50, 150 + index * 90), f"Left paragraph {index}")
+        page.insert_text((350, 155 + index * 90), f"Right paragraph {index}")
+    blocks = _pymupdf_blocks(page, 0, 0)
+    text = [block["text"] for block in blocks]
+    assert text.index("Left paragraph 2") < text.index("Right paragraph 0")
+
+
+def test_inline_math_is_restored_without_model_changes():
+    source = r"We compare $x^2$ and \[a+b=c\] in this equation."
+    masked, formulas = protect_math(source)
+    assert "$x^2$" not in masked
+    assert restore_math("我们比较 " + masked, formulas).endswith(source)
+    with pytest.raises(ValueError):
+        restore_math("公式被遗漏", formulas)
+
+
+def test_reader_loads_one_page_and_its_cached_translations():
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/v1/auth/login", json={"email": "demo@example.com", "password": "change-me"}
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        with SessionLocal() as db:
+            paper = Paper(owner_id="demo@example.com", title="Reader fixture")
+            db.add(paper)
+            db.flush()
+            version = Version(
+                paper_id=paper.id, filename="fixture.pdf", file_key="fixture.pdf", sha256="fixture"
+            )
+            db.add(version)
+            db.flush()
+            first = Block(version_id=version.id, page_index=0, order=0, text="first")
+            second = Block(version_id=version.id, page_index=1, order=1, text="second")
+            db.add_all([first, second])
+            db.flush()
+            db.add(Translation(block_id=second.id, target_lang="zh", text="第二段"))
+            db.commit()
+            version_id, second_id = version.id, second.id
+
+        blocks = client.get(
+            f"/api/v1/versions/{version_id}/blocks?page_start=1&page_end=1", headers=headers
+        )
+        assert blocks.status_code == 200
+        assert [item["id"] for item in blocks.json()["blocks"]] == [second_id]
+        cached = client.get(
+            f"/api/v1/versions/{version_id}/translations?page_index=1", headers=headers
+        )
+        assert cached.json()["translations"] == [
+            {"block_id": second_id, "page_index": 1, "text": "第二段"}
+        ]
+        assert (
+            client.get(
+                f"/api/v1/versions/{version_id}/blocks?page_start=2&page_end=1",
+                headers=headers,
+            ).status_code
+            == 400
+        )
 
 
 def test_version_conflict_requires_user_resolution(monkeypatch):

@@ -4,7 +4,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -342,11 +342,22 @@ def delete_paper(paper_id: str, user: str = Depends(current_user), db: Session =
 
 
 @app.get(API + "/versions/{version_id}/blocks")
-def get_blocks(version_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)):
+def get_blocks(
+    version_id: str,
+    page_start: int | None = Query(default=None, ge=0),
+    page_end: int | None = Query(default=None, ge=0),
+    user: str = Depends(current_user),
+    db: Session = Depends(get_db),
+):
     owned_version(db, version_id, user)
-    blocks = db.scalars(
-        select(Block).where(Block.version_id == version_id).order_by(Block.page_index, Block.order)
-    ).all()
+    if page_start is not None and page_end is not None and page_end < page_start:
+        raise HTTPException(400, "page_end must be >= page_start")
+    statement = select(Block).where(Block.version_id == version_id)
+    if page_start is not None:
+        statement = statement.where(Block.page_index >= page_start)
+    if page_end is not None:
+        statement = statement.where(Block.page_index <= page_end)
+    blocks = db.scalars(statement.order_by(Block.page_index, Block.order)).all()
     items = [
         {
             key: getattr(b, key)
@@ -367,6 +378,33 @@ def get_blocks(version_id: str, user: str = Depends(current_user), db: Session =
         for b in blocks
     ]
     return {"blocks": items, "outline": [x for x in items if x["type"] in ("title", "heading")]}
+
+
+@app.get(API + "/versions/{version_id}/translations")
+def get_cached_translations(
+    version_id: str,
+    page_index: int = Query(ge=0),
+    target_lang: str = "zh",
+    user: str = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    owned_version(db, version_id, user)
+    rows = db.execute(
+        select(Translation, Block)
+        .join(Block, Translation.block_id == Block.id)
+        .where(
+            Block.version_id == version_id,
+            Block.page_index == page_index,
+            Translation.target_lang == target_lang,
+        )
+        .order_by(Block.order)
+    ).all()
+    return {
+        "translations": [
+            {"block_id": item.block_id, "page_index": block.page_index, "text": item.text}
+            for item, block in rows
+        ]
+    }
 
 
 @app.get(API + "/versions/{version_id}/file")

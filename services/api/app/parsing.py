@@ -55,46 +55,114 @@ def _pymupdf_blocks(page: pymupdf.Page, page_index: int, start_order: int) -> li
     for raw in data["blocks"]:
         if "lines" not in raw:
             continue
-        lines = raw["lines"]
-        spans = [span for line in lines for span in line["spans"]]
-        content = " ".join(span["text"].strip() for span in spans if span["text"].strip())
-        if not content:
-            continue
-        kind = "paragraph"
-        numbered_heading = re.match(r"^\s*(\d+(?:\.\d+){0,2})\s+[A-Za-z].{0,90}$", content)
-        font_size = max(span["size"] for span in spans)
-        if (
-            page_index == 0
-            and font_size >= 14
-            and len(content) <= 180
-            and raw["bbox"][1] < height / 2
-            and not re.search(r"arxiv|permission|attribution|copyright|@", content, re.I)
-        ):
-            title_candidates.append((len(output), font_size))
-        if re.match(
-            r"^\s*(abstract|references|bibliography|appendix|摘要|参考文献)\s*$", content, re.I
-        ) or (numbered_heading and font_size >= (9.5 if "." in numbered_heading.group(1) else 11)):
-            kind = "heading"
-        elif re.match(r"^\s*\[\d+\]", content):
-            kind = "reference"
-        x0, y0, x1, y1 = raw["bbox"]
-        output.append(
-            {
-                "page_index": page_index,
-                "order": start_order + len(output),
-                "type": kind,
-                "text": content,
-                "markdown": content,
-                "bbox": [x0 / width, y0 / height, x1 / width, y1 / height],
-                "section_path": [],
-                "parser": "pymupdf",
-                "confidence": None,
-            }
-        )
+        spans = [span for line in raw["lines"] for span in line["spans"]]
+        for part in _split_columns(spans, width):
+            _append_pymupdf_block(
+                part, output, title_candidates, page_index, start_order, width, height
+            )
     if page_index == 0 and start_order == 0 and output:
         index = max(title_candidates, key=lambda item: item[1])[0] if title_candidates else 0
         output[index]["type"] = "title"
+    output = _reading_order(output)
+    for index, block in enumerate(output):
+        block["order"] = start_order + index
     return output
+
+
+def _split_columns(spans: list[dict], page_width: float) -> list[list[dict]]:
+    left = [span for span in spans if span["bbox"][2] <= page_width * 0.46]
+    right = [span for span in spans if span["bbox"][0] >= page_width * 0.54]
+    if left and right and len(left) + len(right) == len(spans):
+        return [left, right]
+    return [spans]
+
+
+def _append_pymupdf_block(
+    spans: list[dict],
+    output: list[dict],
+    title_candidates: list[tuple[int, float]],
+    page_index: int,
+    start_order: int,
+    width: float,
+    height: float,
+) -> None:
+    content = " ".join(span["text"].strip() for span in spans if span["text"].strip())
+    if not content:
+        return
+    kind = "paragraph"
+    numbered_heading = re.match(r"^\s*(\d+(?:\.\d+){0,2})\s+[A-Za-z].{0,90}$", content)
+    font_size = max(span["size"] for span in spans)
+    if (
+        page_index == 0
+        and font_size >= 14
+        and len(content) <= 180
+        and min(span["bbox"][1] for span in spans) < height / 2
+        and not re.search(r"arxiv|permission|attribution|copyright|@", content, re.I)
+    ):
+        title_candidates.append((len(output), font_size))
+    if re.match(
+        r"^\s*(abstract|references|bibliography|appendix|摘要|参考文献)\s*$", content, re.I
+    ) or (numbered_heading and font_size >= (9.5 if "." in numbered_heading.group(1) else 11)):
+        kind = "heading"
+    elif re.match(r"^\s*\[\d+\]", content):
+        kind = "reference"
+    x0 = min(span["bbox"][0] for span in spans)
+    y0 = min(span["bbox"][1] for span in spans)
+    x1 = max(span["bbox"][2] for span in spans)
+    y1 = max(span["bbox"][3] for span in spans)
+    output.append(
+        {
+            "page_index": page_index,
+            "order": start_order + len(output),
+            "type": kind,
+            "text": content,
+            "markdown": content,
+            "bbox": [x0 / width, y0 / height, x1 / width, y1 / height],
+            "section_path": [],
+            "parser": "pymupdf",
+            "confidence": None,
+        }
+    )
+
+
+def _reading_order(blocks: list[dict]) -> list[dict]:
+    """Use the center gutter when PyMuPDF's top-to-bottom order interleaves two columns."""
+    left = [block for block in blocks if block["bbox"][2] <= 0.52]
+    right = [block for block in blocks if block["bbox"][0] >= 0.48]
+    if len(left) < 3 or len(right) < 3:
+        return blocks
+    middle = [block for block in blocks if block not in left and block not in right]
+    ordered = []
+    previous_y = -1.0
+    for separator in sorted(middle, key=lambda block: block["bbox"][1]):
+        next_y = separator["bbox"][1]
+        ordered.extend(
+            sorted(
+                (block for block in left if previous_y <= block["bbox"][1] < next_y),
+                key=lambda block: (block["bbox"][1], block["bbox"][0]),
+            )
+        )
+        ordered.extend(
+            sorted(
+                (block for block in right if previous_y <= block["bbox"][1] < next_y),
+                key=lambda block: (block["bbox"][1], block["bbox"][0]),
+            )
+        )
+        ordered.append(separator)
+        previous_y = next_y
+    ordered.extend(
+        sorted(
+            (block for block in left if block["bbox"][1] >= previous_y),
+            key=lambda block: block["bbox"][1],
+        )
+    )
+    ordered.extend(
+        sorted(
+            (block for block in right if block["bbox"][1] >= previous_y),
+            key=lambda block: block["bbox"][1],
+        )
+    )
+    return ordered
 
 
 def _mineru_blocks(pdf_data: bytes, start: int, end: int, ocr_mode: str = "ocr") -> list[dict]:
