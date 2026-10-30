@@ -25,6 +25,7 @@ from .models import (
     Translation,
     Version,
 )
+from .observability import record
 from .parsing import parse_pdf
 from .retrieval import first_page_evidence, index_chunks, make_chunks, remove_version_index, search
 from .storage import Storage
@@ -58,6 +59,7 @@ def parse_version(task_id: str, version_id: str) -> None:
         version = db.get(Version, version_id)
         task.status = version.parse_status = "running"
         db.commit()
+        record("parser", "INFO", "开始解析 PDF", task_id=task_id, version_id=version_id)
         try:
             data = Storage().get(version.file_key)
             remove_version_index(version_id)
@@ -73,6 +75,7 @@ def parse_version(task_id: str, version_id: str) -> None:
             def progress(done: int, total: int) -> None:
                 task.progress = done / total
                 db.commit()
+                record("parser", "INFO", "解析页进度", task_id=task_id, done=done, total=total)
 
             parsed = parse_pdf(data, progress)
             db.add_all(Block(version_id=version_id, **block) for block in parsed)
@@ -93,9 +96,11 @@ def parse_version(task_id: str, version_id: str) -> None:
                 "tables": sum(block["type"] == "table" for block in parsed),
             }
             task.progress = 1
+            record("parser", "INFO", "PDF 解析与索引完成", task_id=task_id, **task.result)
         except Exception as exc:
             task.status = version.parse_status = "failed"
             task.error = str(exc)[:1000]
+            record("parser", "ERROR", "PDF 解析失败", task_id=task_id, error=task.error)
         db.commit()
 
 
@@ -393,6 +398,7 @@ research_graph = graph_builder.compile()
 
 @celery_app.task(name="research.run_agent")
 def run_agent(run_id: str) -> None:
+    record("worker", "INFO", "科研任务开始", run_id=run_id)
     with SessionLocal() as db:
         run = db.get(AgentRun, run_id)
         run.status = "running"
@@ -415,6 +421,7 @@ def run_agent(run_id: str) -> None:
             run.status = "completed"
             db.commit()
             event(db, run_id, "completed", {"answer": run.answer, "evidence": run.evidence})
+            record("worker", "INFO", "科研任务完成", run_id=run_id)
     except Exception as exc:
         with SessionLocal() as db:
             run = db.get(AgentRun, run_id)
@@ -422,10 +429,12 @@ def run_agent(run_id: str) -> None:
             run.error = str(exc)[:1000]
             db.commit()
             event(db, run_id, "failed", {"error": run.error})
+            record("worker", "ERROR", "科研任务失败", run_id=run_id, error=run.error)
 
 
 @celery_app.task(name="research.refresh_subscriptions")
 def refresh_subscriptions() -> None:
+    record("worker", "INFO", "开始更新论文订阅")
     with SessionLocal() as db:
         for sub in db.scalars(select(Subscription).where(Subscription.active.is_(True))):
             works = []

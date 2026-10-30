@@ -29,12 +29,14 @@ Compose 的基础镜像可通过 `.env` 中的 `POSTGRES_IMAGE`、`REDIS_IMAGE`�
 ```bash
 uv run uvicorn services.api.app.main:app --reload --port 8000
 uv run celery -A services.api.app.worker.celery_app worker -l info -Q default
-uv run celery -A services.api.app.worker.celery_app worker -l info -Q parser --pool=solo
+uv run celery -A services.api.app.worker.celery_app worker -l info -Q parser --pool=solo -n parser@%h
 uv run celery -A services.api.app.worker.celery_app beat -l info
 cd apps/web && npm ci && npm run dev
 ```
 
 浏览器打开 `http://localhost:3000`，用 `.env` 中的演示账号登录。API 文档位于 `http://localhost:8000/docs`。若只验证 API，可设置 `DATABASE_URL=sqlite:///./dev.db`、`S3_ENDPOINT=`、`QDRANT_URL=`、`CELERY_TASK_ALWAYS_EAGER=1`，免启动容器运行确定性测试。
+
+登录后访问 `/debug` 可查看 API 请求、SQLAlchemy 数据库查询活动、任务事件、Redis 队列和在线 Worker；页面每 4 秒更新。该诊断流保留最近约 3000 条事件，不记录 SQL 参数或请求正文。公网模式下需额外设置 `DEBUG_CONSOLE_KEY` 才能读取调试接口；未设置时接口保持关闭。该页面显示的是应用侧数据库活动和 PostgreSQL 统计，不直接读取数据库容器的原始日志。论文目录在 parser 队列任务完成后出现；若始终处于等待状态，先在调试后台确认 `parser` Worker 在线。只导入元数据的记录没有 PDF，也不会生成目录。
 
 ### 本地模型与云端 API 切换
 

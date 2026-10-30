@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     mineru_api_url: str = ""
     mineru_api_key: str = ""
     local_storage: str = "storage"
+    debug_console_key: str = ""
 
     @model_validator(mode="after")
     def validate_cloud(self):

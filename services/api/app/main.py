@@ -1,13 +1,14 @@
 import hashlib
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
@@ -32,11 +33,14 @@ from .models import (
     Translation,
     Version,
 )
+from .observability import client as diagnostic_client
+from .observability import recent as recent_events
+from .observability import record
 from .parsing import identify_pdf, similarity
 from .retrieval import remove_version_index
 from .storage import Storage
 from .translation import translate_blocks
-from .worker import parse_version, refresh_subscriptions, run_agent
+from .worker import celery_app, parse_version, refresh_subscriptions, run_agent
 
 
 @asynccontextmanager
@@ -55,6 +59,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 API = "/api/v1"
+
+
+@app.middleware("http")
+async def log_request(request: Request, call_next):
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        record("api", "ERROR", f"{request.method} {request.url.path}", error=type(exc).__name__)
+        raise
+    if not request.url.path.startswith((API + "/debug", "/health")):
+        record(
+            "api",
+            "ERROR" if response.status_code >= 500 else "INFO",
+            f"{request.method} {request.url.path}",
+            status=response.status_code,
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+        )
+    return response
+
+
+def debug_access(_user: str = Depends(current_user), x_debug_key: str = Header(default="")) -> None:
+    cfg = settings()
+    if cfg.deployment_mode == "cloud" and (
+        not cfg.debug_console_key or not secrets.compare_digest(x_debug_key, cfg.debug_console_key)
+    ):
+        raise HTTPException(403, "Debug console key required")
 
 
 class LoginIn(BaseModel):
@@ -374,6 +405,21 @@ def resolve_conflict(
     }
 
 
+@app.post(API + "/versions/{version_id}/reparse")
+def reparse_version(
+    version_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    version = owned_version(db, version_id, user)
+    if version.parse_status in ("pending", "running", "conflict"):
+        raise HTTPException(409, "Version is already queued or awaiting conflict resolution")
+    version.parse_status = "pending"
+    task = BackgroundTask(owner_id=user, type="parse_pdf", args={"version_id": version.id})
+    db.add(task)
+    db.commit()
+    parse_version.apply_async(args=[task.id, version.id], queue="parser")
+    return {"task_id": task.id, "parse_status": version.parse_status}
+
+
 @app.get(API + "/tasks")
 def list_tasks(user: str = Depends(current_user), db: Session = Depends(get_db)):
     tasks = db.scalars(
@@ -382,6 +428,100 @@ def list_tasks(user: str = Depends(current_user), db: Session = Depends(get_db))
         .order_by(BackgroundTask.created_at.desc())
     ).all()
     return {"items": [task_json(x) for x in tasks]}
+
+
+@app.get(API + "/debug/overview", dependencies=[Depends(debug_access)])
+def debug_overview(db: Session = Depends(get_db)):
+    """Read-only diagnostic snapshot. The cloud console requires a separate key."""
+    database = {"backend": engine.url.get_backend_name(), "available": True}
+    try:
+        db.execute(text("SELECT 1").execution_options(skip_diagnostic_log=True))
+        database["papers"] = db.scalar(
+            select(func.count()).select_from(Paper).execution_options(skip_diagnostic_log=True)
+        )
+        database["versions"] = db.scalar(
+            select(func.count()).select_from(Version).execution_options(skip_diagnostic_log=True)
+        )
+        database["blocks"] = db.scalar(
+            select(func.count()).select_from(Block).execution_options(skip_diagnostic_log=True)
+        )
+        if database["backend"] == "postgresql":
+            database["postgres"] = dict(
+                db.execute(
+                    text("""
+                SELECT numbackends, xact_commit, xact_rollback, blks_read, blks_hit, deadlocks
+                FROM pg_stat_database WHERE datname = current_database()
+            """).execution_options(skip_diagnostic_log=True)
+                )
+                .mappings()
+                .one()
+            )
+    except Exception as exc:
+        database = {
+            "backend": engine.url.get_backend_name(),
+            "available": False,
+            "error": type(exc).__name__,
+        }
+        db.rollback()
+
+    jobs = (
+        db.scalars(
+            select(BackgroundTask)
+            .order_by(BackgroundTask.created_at.desc())
+            .limit(30)
+            .execution_options(skip_diagnostic_log=True)
+        ).all()
+        if database["available"]
+        else []
+    )
+    version_ids = [
+        job.args["version_id"] for job in jobs if job.args and job.args.get("version_id")
+    ]
+    versions = {
+        version.id: version
+        for version in db.scalars(
+            select(Version)
+            .where(Version.id.in_(version_ids))
+            .execution_options(skip_diagnostic_log=True)
+        )
+    }
+    papers = {
+        paper.id: paper
+        for paper in db.scalars(
+            select(Paper)
+            .where(Paper.id.in_([version.paper_id for version in versions.values()]))
+            .execution_options(skip_diagnostic_log=True)
+        )
+    }
+    task_items = []
+    for job in jobs:
+        item = task_json(job)
+        version_id = job.args.get("version_id") if job.args else None
+        if version_id:
+            version = versions.get(version_id)
+            paper = papers.get(version.paper_id) if version else None
+            item["paper_title"] = paper.title if paper else None
+            item["paper_id"] = paper.id if paper else None
+            item["version_status"] = version.parse_status if version else None
+        task_items.append(item)
+
+    broker = {"available": False, "parser_queue": None, "default_queue": None, "workers": []}
+    events = []
+    try:
+        redis = diagnostic_client()
+        redis.ping()
+        broker.update(
+            available=True, parser_queue=redis.llen("parser"), default_queue=redis.llen("default")
+        )
+        events = recent_events()
+        queues = celery_app.control.inspect(timeout=0.6).active_queues() or {}
+        broker["workers"] = [
+            {"name": name, "queues": [entry["name"] for entry in entries]}
+            for name, entries in queues.items()
+        ]
+    except Exception as exc:
+        broker["error"] = type(exc).__name__
+    return {"database": database, "broker": broker, "tasks": task_items, "events": events}
 
 
 @app.get(API + "/tasks/{task_id}")

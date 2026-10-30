@@ -13,6 +13,7 @@ import {
   Menu,
   Network,
   Sparkles,
+  Terminal,
   X,
 } from "lucide-react";
 
@@ -32,6 +33,10 @@ const groups = [
       { href: "/copilot", label: "写作与绘图", icon: ChartNoAxesCombined },
       { href: "/tasks", label: "任务中心", icon: ListTodo },
     ],
+  },
+  {
+    label: "系统",
+    links: [{ href: "/debug", label: "调试后台", icon: Terminal }],
   },
 ] as const;
 

@@ -49,6 +49,7 @@ def similarity(a: str, b: str) -> float:
 
 def _pymupdf_blocks(page: pymupdf.Page, page_index: int, start_order: int) -> list[dict]:
     output = []
+    title_candidates = []
     data = page.get_text("dict", sort=True)
     width, height = page.rect.width, page.rect.height
     for raw in data["blocks"]:
@@ -60,10 +61,16 @@ def _pymupdf_blocks(page: pymupdf.Page, page_index: int, start_order: int) -> li
         if not content:
             continue
         kind = "paragraph"
-        if page_index == 0 and start_order == 0 and not output:
-            kind = "title"
         numbered_heading = re.match(r"^\s*(\d+(?:\.\d+){0,2})\s+[A-Za-z].{0,90}$", content)
         font_size = max(span["size"] for span in spans)
+        if (
+            page_index == 0
+            and font_size >= 14
+            and len(content) <= 180
+            and raw["bbox"][1] < height / 2
+            and not re.search(r"arxiv|permission|attribution|copyright|@", content, re.I)
+        ):
+            title_candidates.append((len(output), font_size))
         if re.match(
             r"^\s*(abstract|references|bibliography|appendix|摘要|参考文献)\s*$", content, re.I
         ) or (numbered_heading and font_size >= (9.5 if "." in numbered_heading.group(1) else 11)):
@@ -84,6 +91,9 @@ def _pymupdf_blocks(page: pymupdf.Page, page_index: int, start_order: int) -> li
                 "confidence": None,
             }
         )
+    if page_index == 0 and start_order == 0 and output:
+        index = max(title_candidates, key=lambda item: item[1])[0] if title_candidates else 0
+        output[index]["type"] = "title"
     return output
 
 
@@ -138,9 +148,12 @@ def _mineru_blocks(pdf_data: bytes, start: int, end: int, ocr_mode: str = "ocr")
             if not text.strip():
                 continue
             kind = item.get("type", "text")
-            kind = {"text": "paragraph", "paragraph_title": "heading", "ref_text": "reference"}.get(
-                kind, kind
-            )
+            kind = {
+                "text": "paragraph",
+                "doc_title": "title",
+                "paragraph_title": "heading",
+                "ref_text": "reference",
+            }.get(kind, kind)
             output.append(
                 {
                     "page_index": index,

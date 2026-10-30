@@ -4,6 +4,7 @@ import tempfile
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 db_fd, db_path = tempfile.mkstemp(suffix=".sqlite3")
 os.close(db_fd)
@@ -20,11 +21,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from services.api.app.charts import render_chart
-from services.api.app.db import Base
+from services.api.app.db import Base, SessionLocal
 from services.api.app.graphs import build_graph
 from services.api.app.main import app
-from services.api.app.models import Paper
-from services.api.app.parsing import identify_pdf, parse_pdf
+from services.api.app.models import Paper, Version
+from services.api.app.parsing import _pymupdf_blocks, identify_pdf, parse_pdf
 from services.api.app.worker import _compose, _verify
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -45,6 +46,15 @@ def test_official_transformer_pdf_has_structured_blocks():
     assert sum(x["type"] == "title" for x in outline) == 1
     assert any(x["text"] == "5.3 Optimizer" for x in outline)
     assert not any("avaswani@" in x["text"] for x in outline)
+
+
+def test_permission_notice_is_not_the_paper_title():
+    import pymupdf
+
+    doc = pymupdf.open(SAMPLES / "1706.03762v7.pdf")
+    blocks = _pymupdf_blocks(doc[0], 0, 0)
+    titles = [block["text"] for block in blocks if block["type"] == "title"]
+    assert titles == ["Attention Is All You Need"]
 
 
 def test_version_conflict_requires_user_resolution(monkeypatch):
@@ -80,6 +90,55 @@ def test_version_conflict_requires_user_resolution(monkeypatch):
         )
         assert result.status_code == 200, result.text
         assert result.json()["preferred_version_id"] == first.json()["version_ids"][0]
+
+
+def test_debug_requires_auth_and_completed_version_can_be_reparsed(monkeypatch):
+    monkeypatch.setattr("services.api.app.main.parse_version.apply_async", lambda **kwargs: None)
+    with TestClient(app) as client:
+        assert client.get("/api/v1/debug/overview").status_code == 401
+        login = client.post(
+            "/api/v1/auth/login", json={"email": "demo@example.com", "password": "change-me"}
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        overview = client.get("/api/v1/debug/overview", headers=headers)
+        assert overview.status_code == 200
+        assert "database" in overview.json()
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "services.api.app.main.settings",
+                lambda: SimpleNamespace(deployment_mode="cloud", debug_console_key="test-key"),
+            )
+            assert client.get("/api/v1/debug/overview", headers=headers).status_code == 403
+            assert (
+                client.get(
+                    "/api/v1/debug/overview", headers={**headers, "X-Debug-Key": "test-key"}
+                ).status_code
+                == 200
+            )
+        paper = client.post(
+            "/api/v1/papers/upload",
+            headers=headers,
+            files={
+                "files": (
+                    "1706.03762v1.pdf",
+                    (SAMPLES / "1706.03762v1.pdf").read_bytes(),
+                    "application/pdf",
+                )
+            },
+        ).json()
+        version_id = paper["version_ids"][0]
+        assert (
+            client.post(f"/api/v1/versions/{version_id}/reparse", headers=headers).status_code
+            == 409
+        )
+        with SessionLocal() as db:
+            version = db.get(Version, version_id)
+            version.parse_status = "completed"
+            db.commit()
+        assert (
+            client.post(f"/api/v1/versions/{version_id}/reparse", headers=headers).status_code
+            == 200
+        )
 
 
 def test_chart_caption_is_computed_from_csv():

@@ -1,10 +1,16 @@
 "use client";
 import Link from "next/link";
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import { api, Paper } from "@/lib/api";
 import PdfCanvas from "@/components/PdfCanvas";
 import RunPanel from "@/components/RunPanel";
-import { BookOpenText, Languages, Maximize2, PanelRight } from "lucide-react";
+import {
+  BookOpenText,
+  Languages,
+  Maximize2,
+  PanelRight,
+  RefreshCw,
+} from "lucide-react";
 
 type Version = {
   id: string;
@@ -38,7 +44,8 @@ export default function Reader({
     [translatedText, setTranslatedText] = useState(""),
     [returnPage, setReturnPage] = useState<number | null>(null),
     [showAssistant, setShowAssistant] = useState(false),
-    [focusMode, setFocusMode] = useState(false);
+    [focusMode, setFocusMode] = useState(false),
+    [reparsing, setReparsing] = useState(false);
   useEffect(() => {
     const url = new URL(window.location.href);
     const frame = requestAnimationFrame(() => {
@@ -47,24 +54,45 @@ export default function Reader({
     });
     return () => cancelAnimationFrame(frame);
   }, []);
-  useEffect(() => {
+  const refreshPaper = useCallback(() => {
     if (!id) return;
-    api<{ paper: Paper; versions: Version[] }>(`/papers/${id}`)
+    return api<{ paper: Paper; versions: Version[] }>(`/papers/${id}`)
       .then((x) => {
         setPaper(x.paper);
         setVersions(x.versions);
       })
       .catch((e) => setError(String(e)));
   }, [id]);
+  useEffect(() => {
+    refreshPaper();
+  }, [refreshPaper]);
+  const preferred = versions.find(
+    (item) => item.id === paper?.preferred_version_id,
+  );
   const version =
-    selectedVersion || paper?.preferred_version_id || versions[0]?.id;
+    selectedVersion ||
+    (preferred?.parse_status === "completed"
+      ? preferred.id
+      : versions.find((item) => item.parse_status === "completed")?.id) ||
+    paper?.preferred_version_id ||
+    versions[0]?.id;
   const activeVersion = versions.find((item) => item.id === version);
+  useEffect(() => {
+    if (
+      !versions.some((item) =>
+        ["pending", "running"].includes(item.parse_status),
+      )
+    )
+      return;
+    const timer = setInterval(refreshPaper, 3000);
+    return () => clearInterval(timer);
+  }, [versions, refreshPaper]);
   useEffect(() => {
     if (!version) return;
     api<{ blocks: Block[] }>(`/versions/${version}/blocks`)
       .then((x) => setBlocks(x.blocks))
       .catch((e) => setError(String(e)));
-  }, [version]);
+  }, [version, activeVersion?.parse_status]);
   async function ask() {
     try {
       const x = await api<{ run_id: string }>("/chat/runs", {
@@ -74,6 +102,20 @@ export default function Reader({
       setRun(x.run_id);
     } catch (e) {
       setError(String(e));
+    }
+  }
+  async function reparse() {
+    if (!version) return;
+    setReparsing(true);
+    setError("");
+    try {
+      await api(`/versions/${version}/reparse`, { method: "POST" });
+      setBlocks([]);
+      await refreshPaper();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setReparsing(false);
     }
   }
   async function translateSelection() {
@@ -164,7 +206,7 @@ export default function Reader({
           >
             <Maximize2 size={15} /> 专注
           </button>
-          {id && (
+          {version && (
             <Link className="button" href={`/papers/${id}/translate`}>
               <Languages size={15} /> 双语
             </Link>
@@ -172,6 +214,28 @@ export default function Reader({
         </div>
       </div>
       {error && <div className="error">{error}</div>}
+      {paper && !versions.length && (
+        <div className="panel reader-status">
+          此记录目前只有论文元数据，尚未导入 PDF，因此没有可解析的目录。
+        </div>
+      )}
+      {activeVersion && activeVersion.parse_status !== "completed" && (
+        <div className="panel reader-status">
+          {activeVersion.parse_status === "failed"
+            ? "此版本解析失败。请到任务中心查看错误并重试。"
+            : activeVersion.parse_status === "conflict"
+              ? "此版本等待版本冲突处理。"
+              : "此版本正在等待或执行解析；页面会自动更新。若长时间停留在排队状态，请到调试后台检查 parser Worker。"}
+          <Link href="/debug">查看调试后台 →</Link>
+        </div>
+      )}
+      {preferred &&
+        preferred.id !== version &&
+        preferred.parse_status !== "completed" && (
+          <div className="panel reader-status">
+            默认版本仍在解析；当前展示一个已完成解析的版本。
+          </div>
+        )}
       {versions.length > 0 && (
         <div className="version-bar">
           <span className="section-label">论文版本</span>
@@ -186,6 +250,17 @@ export default function Reader({
               {v.id === paper?.preferred_version_id ? " · 默认" : ""}
             </button>
           ))}
+          {activeVersion &&
+            ["completed", "failed"].includes(activeVersion.parse_status) && (
+              <button
+                className="button ghost"
+                onClick={reparse}
+                disabled={reparsing}
+                title="重新提取目录与内容块"
+              >
+                <RefreshCw size={14} /> {reparsing ? "提交中…" : "重新解析"}
+              </button>
+            )}
         </div>
       )}
       {version && (
@@ -197,7 +272,9 @@ export default function Reader({
               <h3>论文目录</h3>
               {!headings.length && (
                 <p className="muted" style={{ padding: "0 8px", fontSize: 12 }}>
-                  目录解析中，或该文档没有可识别的标题。
+                  {activeVersion?.parse_status === "completed"
+                    ? "解析已完成，但没有识别出章节标题。"
+                    : "目录将在解析完成后显示。"}
                 </p>
               )}
               {headings.map((x) => (
