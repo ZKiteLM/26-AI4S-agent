@@ -58,8 +58,8 @@ def run_case(client: httpx.Client, case: dict, papers: dict[str, str], timeout: 
         return {"case": case["name"], "passed": False, "error": "timeout", "run_id": run_id}
 
     answer = run.get("answer") or ""
-    cited_ids = set(re.findall(r"\[([0-9a-fA-F-]{36})\]", answer))
-    cited = [item for item in run.get("evidence") or [] if item["evidence_id"] in cited_ids]
+    cited_numbers = {int(number) for number in re.findall(r"\[(\d+)\]", answer)}
+    cited = [item for item in run.get("evidence") or [] if item.get("number") in cited_numbers]
     cited_papers = {item["paper_id"] for item in cited}
     if case.get("refuse"):
         passed = run["status"] == "completed" and ("无法" in answer or "不足" in answer)

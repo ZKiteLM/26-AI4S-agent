@@ -17,7 +17,11 @@ def generate(system: str, prompt: str, max_tokens: int = 1200, json_mode: bool =
             "model": cfg.llm_model,
             "stream": False,
             "think": False,
-            "options": {"temperature": 0, "num_predict": max_tokens},
+            "options": {
+                "temperature": 0,
+                "num_predict": max_tokens,
+                "num_ctx": cfg.ollama_num_ctx,
+            },
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -30,6 +34,11 @@ def generate(system: str, prompt: str, max_tokens: int = 1200, json_mode: bool =
             json=payload,
             timeout=75,
         )
+        if response.status_code == 400 and "exceeds the available context size" in response.text:
+            raise RuntimeError(
+                f"Local model context is too small (OLLAMA_NUM_CTX={cfg.ollama_num_ctx}). "
+                "Reduce retrieved context or increase OLLAMA_NUM_CTX."
+            )
         response.raise_for_status()
         return response.json()["message"]["content"]
     if cfg.llm_provider != "openai":

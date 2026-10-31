@@ -8,7 +8,7 @@ import ReaderColumns from "@/components/ReaderColumns";
 import BilingualPane from "@/components/BilingualPane";
 import ContinuousPdfViewer from "@/components/ContinuousPdfViewer";
 import MathMarkdown from "@/components/MathMarkdown";
-import RunPanel from "@/components/RunPanel";
+import ChatWorkspace from "@/components/ChatWorkspace";
 import { pdfPageAtAnchor, ReaderBlock } from "@/lib/reader";
 import {
   BookOpenText,
@@ -65,8 +65,6 @@ export default function Reader({
   const [bilingualFocus, setBilingualFocus] = useState<ReaderBlock | null>(
     null,
   );
-  const [question, setQuestion] = useState("");
-  const [run, setRun] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [selectedText, setSelectedText] = useState("");
   const [translatedText, setTranslatedText] = useState("");
@@ -84,6 +82,7 @@ export default function Reader({
       setPage(initial);
       setInitialPage(initial);
       setFocusId(url.searchParams.get("block"));
+      setSelectedVersion(url.searchParams.get("version"));
       if (panel === "selection" || panel === "bilingual") setRightMode(panel);
       else if (legacy === "bilingual") setRightMode("bilingual");
       else if (legacy === "assistant") {
@@ -113,7 +112,9 @@ export default function Reader({
     (item) => item.id === paper?.preferred_version_id,
   );
   const version =
-    selectedVersion ||
+    (selectedVersion && versions.some((item) => item.id === selectedVersion)
+      ? selectedVersion
+      : null) ||
     (preferred?.parse_status === "completed"
       ? preferred.id
       : versions.find((item) => item.parse_status === "completed")?.id) ||
@@ -150,6 +151,7 @@ export default function Reader({
     nextFocus: string | null = focusId,
     nextPanel = rightMode,
     nextAi = aiOpen,
+    nextVersion = version,
   ) {
     const url = new URL(window.location.href);
     url.searchParams.set("page", String(nextPage));
@@ -160,6 +162,9 @@ export default function Reader({
     else url.searchParams.set("panel", nextPanel);
     if (nextAi) url.searchParams.set("ai", "1");
     else url.searchParams.delete("ai");
+    if (nextVersion && nextVersion !== paper?.preferred_version_id)
+      url.searchParams.set("version", nextVersion);
+    else url.searchParams.delete("version");
     url.searchParams.delete("focus");
     window.history.replaceState(null, "", url.pathname + url.search);
   }
@@ -214,16 +219,43 @@ export default function Reader({
     }));
     updateUrl(target, blockId);
   }
+  function jumpToChatReference(
+    targetPage: number,
+    blockId: string,
+    sourceVersionId?: string,
+  ) {
+    if (
+      sourceVersionId &&
+      sourceVersionId !== version &&
+      versions.some((item) => item.id === sourceVersionId)
+    ) {
+      const target = Math.max(1, targetPage);
+      setSelectedVersion(sourceVersionId);
+      setBlocks([]);
+      setInitialPage(target);
+      setPage(target);
+      setFocusId(blockId);
+      setJumpPage((previous) => ({
+        page: target,
+        nonce: (previous?.nonce || 0) + 1,
+      }));
+      updateUrl(target, blockId, rightMode, aiOpen, sourceVersionId);
+      return;
+    }
+    goPage(targetPage, blockId);
+  }
   function switchVersion(next: string) {
     if (next === version) return;
     setSelectedVersion(next);
     setBlocks([]);
-    setRun(null);
     setSelectedText("");
     setTranslatedText("");
     setBilingualFocus(null);
     setInitialPage(1);
-    goPage(1);
+    setPage(1);
+    setFocusId(null);
+    setJumpPage((previous) => ({ page: 1, nonce: (previous?.nonce || 0) + 1 }));
+    updateUrl(1, null, rightMode, aiOpen, next);
   }
   const references = blocks.filter((block) => block.type === "reference");
   function jumpCitation(number: number) {
@@ -265,18 +297,6 @@ export default function Reader({
       setTranslating(false);
     }
   }
-  async function ask() {
-    try {
-      const result = await api<{ run_id: string }>("/chat/runs", {
-        method: "POST",
-        body: JSON.stringify({ question, paper_ids: [id] }),
-      });
-      setRun(result.run_id);
-    } catch (cause) {
-      setError(String(cause));
-    }
-  }
-
   const focused = blocks.find((block) => block.id === focusId);
   const headings = blocks.filter(
     (block) => block.type === "heading" || block.type === "title",
@@ -371,19 +391,7 @@ export default function Reader({
       {version !== paper?.preferred_version_id && (
         <p className="muted">问答检索默认版本的内容。</p>
       )}
-      <textarea
-        className="textarea"
-        value={question}
-        onChange={(event) => setQuestion(event.target.value)}
-        placeholder="询问论文细节…"
-        aria-label="论文问题"
-      />
-      <button className="button" disabled={!question.trim()} onClick={ask}>
-        检索证据并回答
-      </button>
-      <div className="reader-run">
-        <RunPanel runId={run} />
-      </div>
+      <ChatWorkspace paperId={id} onReferenceClick={jumpToChatReference} />
     </section>
   );
   const right = (rightMode !== "none" || aiOpen) && version && (
@@ -539,6 +547,7 @@ export default function Reader({
             resetToken={resetToken}
             center={
               <ContinuousPdfViewer
+                key={version}
                 versionId={version}
                 pageCount={activeVersion?.page_count || 1}
                 initialPage={initialPage}

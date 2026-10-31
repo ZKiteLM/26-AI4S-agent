@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_provider: Literal["openai", "ollama"] = "openai"
+    ollama_num_ctx: int = Field(default=8192, ge=4096, le=32768)
     embedding_base_url: str = ""
     embedding_api_key: str = ""
     embedding_model: str = ""

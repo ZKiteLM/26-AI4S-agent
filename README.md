@@ -40,6 +40,8 @@ cd apps/web && npm ci && npm run dev
 
 论文详情页使用固定视口的 PDF 阅读工作区，页面本身不滚动。左侧文献大纲可在章节目录和 PDF 缩略图之间切换，也可收起；中间 PDF 阅读器始终保留。右侧“划词翻译”和“双语滚动”最多打开一个，“AI 问答”可独立开关；三个工具全部关闭时就是专注阅读。只有打开“划词翻译”后，选中的 PDF 文字才会进入翻译侧栏。主导航可折叠，拖动面板分隔条或用方向键调整宽度，“恢复默认比例”可重置布局。引用只有点击 PDF 中的编号文字才跳转，跳转后可返回引用处。双语滚动时 PDF 与译文按内容块联动；PDF 仅渲染视口附近页面，内容块和已缓存译文按页加载。“翻译当前页”只翻译未缓存的内容块，结果持久化。MinerU 解析的独立公式以 LaTeX 保存，行内公式会在翻译时保留，译文用 KaTeX 渲染。旧版本可在论文详情页重新解析；与旧内容完全一致的段落译文缓存会被保留，发生变化的内容需要重新翻译。
 
+科研问答使用持久化会话：可新建、删除并在刷新后继续追问。每条消息对应一次有上限的 ReAct 工具循环；模型可在一轮中提交最多 4 个 query 并发调用文献检索，也可根据文档大纲中的块索引调用 `read_paper` 阅读指定位置的连续原文。检索采用约 520 字的小片段 BM25 与向量召回，并用 RRF 融合；返回其所在的较大父块作为证据。界面在答案前显示可折叠的工具过程，每次新增证据也可展开查看；最终引用按当前答案重新编号为 `[1]`、`[2]`，点击来源卡片可回到 PDF 原文。运行记录、消息与证据保存在数据库中；模型服务不可用时会显示失败原因和重新提问入口。已有解析数据升级后运行 `uv run python scripts/reindex_retrieval.py` 重建小片段向量索引。
+
 ### 本地模型与云端 API 切换
 
 LLM、Embedding、Reranker 和扫描件 OCR 有独立配置。开发机可运行 Ollama 等兼容 OpenAI 接口的服务；示例：
@@ -50,7 +52,7 @@ ollama pull qwen3:4b-instruct
 ollama pull bge-m3
 ```
 
-在 `.env` 中设置 `LLM_PROVIDER=ollama`、`LLM_BASE_URL=http://localhost:11434/v1`、`LLM_MODEL=qwen3:4b-instruct`、`EMBEDDING_BASE_URL=http://localhost:11434/v1`、`EMBEDDING_MODEL=bge-m3`。Ollama 适配器使用原生接口；云端设 `LLM_PROVIDER=openai` 并填外部兼容 API 地址。本机 API 直接运行时使用 `localhost`；API 容器访问宿主机模型时使用 `host.docker.internal`。Reranker 可设置兼容 `/rerank` 的服务；未设置时使用混合召回结果。
+在 `.env` 中设置 `LLM_PROVIDER=ollama`、`LLM_BASE_URL=http://localhost:11434/v1`、`LLM_MODEL=qwen3:4b-instruct`、`EMBEDDING_BASE_URL=http://localhost:11434/v1`、`EMBEDDING_MODEL=bge-m3`。本地模型上下文由 `OLLAMA_NUM_CTX` 控制，默认 8192；跨论文问答所需上下文较长时可调高。Ollama 适配器使用原生接口；云端设 `LLM_PROVIDER=openai` 并填外部兼容 API 地址。本机 API 直接运行时使用 `localhost`；API 容器访问宿主机模型时使用 `host.docker.internal`。Reranker 可设置兼容 `/rerank` 的服务；未设置时使用混合召回结果。
 
 扫描 PDF 使用本机 MinerU Worker：`uv run mineru-kit models download --tier basic` 后以 `PARSER_BACKEND=local` 运行。默认对 50 页以内的矢量 PDF 也做版式增强，提取公式 LaTeX 和表格；长文档使用分批 PyMuPDF 解析。需要增强长论文公式时可调高 `PARSER_VECTOR_MAX_PAGES`，解析耗时与模型调用量会相应增加。如需快速开发测试，可设 `PARSER_VECTOR_ENHANCE=0`。公网部署时将 `LLM_*`、`EMBEDDING_*`、`RERANK_*` 指向云端服务，并设置 `PARSER_BACKEND=remote`、`MINERU_API_URL`、`MINERU_API_KEY`；业务代码和数据模型无需更改。远程解析适配 MinerU V1 `/v1/file_parse`；所选服务需要支持该接口。[接口说明](https://github.com/opendatalab/MinerU/blob/master/docs/en/usage/http_api.md)
 
@@ -75,7 +77,7 @@ cd apps/web && npm run format:check && npm run lint && npm run build
 
 官方样例评测：`uv run python scripts/evaluate_official.py`，结果写入 `reports/official_evaluation.json`。扫描版首次运行需先下载 MinerU Basic 模型，耗时取决于本机与模型源。报告记录版本识别、页数、Block/公式/表格数、定位坐标与解析用时；学术事实准确率仍需用固定问答集人工核验，不能从解析成功推断。
 
-将官方 Transformer 论文和《Language Models are Few-Shot Learners》上传、解析并索引后，可运行 `uv run python -m scripts.evaluate_rag`。脚本通过实际 API 提问 Adam 参数、训练硬件、跨论文注意力架构与无依据问题，检查答案关键词、证据 UUID、引用论文覆盖与拒答，报告写入 `reports/rag_evaluation.json`。自动检查只是回归门槛，结论仍应人工核对原文。
+将官方 Transformer 论文和《Language Models are Few-Shot Learners》上传、解析并索引后，可运行 `uv run python -m scripts.evaluate_rag`。脚本通过实际 API 提问 Adam 参数、训练硬件、跨论文注意力架构与无依据问题，检查答案关键词、数字引用与证据对应关系、引用论文覆盖与拒答，报告写入 `reports/rag_evaluation.json`。自动检查只是回归门槛，结论仍应人工核对原文。
 
 ## 设计约束
 

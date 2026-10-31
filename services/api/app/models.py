@@ -91,6 +91,9 @@ class AgentRun(Base):
     __tablename__ = "agent_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(80), index=True)
+    session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_sessions.id"), nullable=True, index=True
+    )
     question: Mapped[str] = mapped_column(Text)
     kind: Mapped[str] = mapped_column(String(30), default="chat")
     paper_ids: Mapped[list] = mapped_column(JSON, default=list)
@@ -98,6 +101,27 @@ class AgentRun(Base):
     answer: Mapped[str] = mapped_column(Text, default="")
     evidence: Mapped[list] = mapped_column(JSON, default=list)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(String(80), index=True)
+    title: Mapped[str] = mapped_column(String(160), default="新会话")
+    paper_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("chat_sessions.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"), nullable=True)
+    evidence: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

@@ -21,16 +21,25 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from services.api.app.charts import render_chart
+from services.api.app.chat_agent import (
+    _compact_query,
+    _model_sources,
+    author_order_answer,
+    number_citations,
+    run_react,
+)
 from services.api.app.db import Base, SessionLocal
 from services.api.app.graphs import build_graph
 from services.api.app.main import app
-from services.api.app.models import BackgroundTask, Block, Paper, Translation, Version
+from services.api.app.models import AgentRun, BackgroundTask, Block, Paper, Translation, Version
 from services.api.app.parsing import (
+    _merge_split_scientific_cells,
     _mineru_markdown,
     _pymupdf_blocks,
     identify_pdf,
     parse_pdf,
 )
+from services.api.app.retrieval import make_chunks, paper_outline, read_paper_fragment, search
 from services.api.app.translation import protect_math, restore_math, translate_text
 from services.api.app.worker import _compose, _verify
 
@@ -98,6 +107,17 @@ def test_mineru_inline_formula_becomes_markdown_math():
         == "where $x^2 + y^2$ is constant"
     )
     assert _mineru_markdown(r"Use $\\sqrt{x}$ here") == r"Use $\sqrt{x}$ here"
+
+
+def test_mineru_table_keeps_scientific_notation_in_one_cell():
+    source = (
+        "<tr><td>Method A</td><td>1.2 ×</td><td>10<sup>7</sup></td></tr>"
+        "<tr><td>Method B</td><td>3.3 ·</td><td>10<sup>18</sup></td></tr>"
+    )
+    assert _merge_split_scientific_cells(source) == (
+        '<tr><td>Method A</td><td colspan="2">1.2 × 10<sup>7</sup></td></tr>'
+        '<tr><td>Method B</td><td colspan="2">3.3 · 10<sup>18</sup></td></tr>'
+    )
 
 
 def test_selection_translation_preserves_formula(monkeypatch):
@@ -368,6 +388,263 @@ def test_short_evidence_labels_map_to_real_block_ids(monkeypatch):
     assert _compose(state)["answer"] == f"β1=0.9 [{source_id}]"
 
 
+def test_react_searches_multiple_queries_then_refines(monkeypatch):
+    from services.api.app import chat_agent
+
+    decisions = iter(
+        [
+            {"action": "search", "queries": ["optimizer beta", "training hardware"]},
+            {"action": "search", "queries": ["Adam beta1 exact value"]},
+            {"action": "answer", "answer": "Beta1 is 0.9 [E1]."},
+        ]
+    )
+    queried = []
+    events = []
+    source_id = "11111111-1111-1111-1111-111111111111"
+    monkeypatch.setattr(chat_agent, "_ask_model", lambda *_args: next(decisions))
+
+    def fake_search(_owner, _papers, query):
+        queried.append(query)
+        return (
+            [
+                {
+                    "evidence_id": source_id,
+                    "block_id": source_id,
+                    "paper_id": "p",
+                    "paper_title": "Fixture",
+                    "page_index": 2,
+                    "quote": "Adam uses beta1=0.9.",
+                }
+            ]
+            if query == "Adam beta1 exact value"
+            else []
+        )
+
+    monkeypatch.setattr(chat_agent, "_search_one", fake_search)
+    answer, evidence = run_react(
+        SimpleNamespace(
+            session_id=None, question="What is beta1?", owner_id="owner", paper_ids=["p"]
+        ),
+        lambda name, data: events.append((name, data)),
+    )
+    assert set(queried) == {"optimizer beta", "training hardware", "Adam beta1 exact value"}
+    assert [data["round"] for name, data in events if name == "tool_started"] == [1, 2]
+    numbered, sources = number_citations(answer, evidence)
+    assert numbered == "Beta1 is 0.9 [1]."
+    assert [(source["number"], source["evidence_id"]) for source in sources] == [(1, source_id)]
+
+
+def test_search_query_omits_selected_paper_title():
+    assert _compact_query("A Study of Widgets optimizer setting", ["A Study of Widgets"]) == (
+        "optimizer setting"
+    )
+
+
+def test_agent_context_budget_keeps_latest_evidence():
+    evidence = [{"paper_title": "Paper", "page_index": 0, "quote": "x" * 2400} for _ in range(24)]
+    sources = _model_sources(evidence)
+    assert sum(len(item["quote"]) for item in sources) <= 12000
+    assert sources[-1]["id"] == "E24"
+
+
+def test_react_reads_document_position_before_answer(monkeypatch):
+    from services.api.app import chat_agent
+
+    decisions = iter(
+        [
+            {"action": "read", "paper_id": "paper", "start": 0, "length": 1},
+            {"action": "read", "paper_id": "paper", "start": 0, "length": 8},
+            {"action": "answer", "answer": "第六作者是 Aidan Gomez [E1]。"},
+        ]
+    )
+    source_id = "11111111-1111-1111-1111-111111111111"
+    events = []
+    monkeypatch.setattr(chat_agent, "_ask_model", lambda *_args: next(decisions))
+    monkeypatch.setattr(
+        chat_agent,
+        "_read_one",
+        lambda _owner, _paper, _start, length: [
+            {
+                "evidence_id": source_id,
+                "block_id": source_id,
+                "paper_id": "paper",
+                "paper_title": "Fixture",
+                "page_index": 0,
+                "quote": (
+                    "First Author\n...\nAidan Gomez · University of Toronto"
+                    if length > 1
+                    else "First Author"
+                ),
+            }
+        ],
+    )
+    answer, evidence = run_react(
+        SimpleNamespace(
+            session_id=None, question="第六作者是谁？", owner_id="owner", paper_ids=["paper"]
+        ),
+        lambda name, data: events.append((name, data)),
+    )
+    assert f"[{source_id}]" in answer
+    assert len(evidence) == 1
+    assert [data["tool"] for name, data in events if name == "tool_started"] == [
+        "read_paper",
+        "read_paper",
+    ]
+    assert events[-1][1]["sources"][0]["quote"].startswith("First Author")
+    assert events[-1][1]["expanded_sources"] == 1
+    assert "Aidan Gomez" in evidence[0]["quote"]
+
+
+def test_search_includes_each_selected_paper(monkeypatch):
+    from services.api.app import chat_agent
+
+    searched_papers = []
+
+    def fake_search(_db, _owner, paper_ids, _query, limit):
+        assert limit == 4
+        searched_papers.extend(paper_ids)
+        return [{"paper_id": paper_ids[0]}]
+
+    monkeypatch.setattr(chat_agent, "search", fake_search)
+    results = chat_agent._search_one("owner", ["paper-a", "paper-b"], "optimizer")
+    assert searched_papers == ["paper-a", "paper-b"]
+    assert [item["paper_id"] for item in results] == searched_papers
+
+
+def test_small_passage_returns_author_list_parent_and_read_by_index(monkeypatch):
+    from services.api.app import retrieval
+
+    monkeypatch.setattr(retrieval, "settings", lambda: SimpleNamespace(qdrant_url=""))
+    with SessionLocal() as db:
+        paper = Paper(owner_id="reader", title="Fixture Paper")
+        db.add(paper)
+        db.flush()
+        version = Version(
+            paper_id=paper.id, filename="fixture.pdf", file_key="fixture", sha256="a" * 64
+        )
+        db.add(version)
+        db.flush()
+        paper.preferred_version_id = version.id
+        authors = [
+            "First Author · Institute A",
+            "Second Author · Institute B",
+            "Third Author · Institute C",
+            "Fourth Author · Institute D",
+            "Fifth Author · Institute E",
+            "Aidan Gomez · † University of Toronto",
+        ]
+        db.add(
+            Block(version_id=version.id, page_index=0, order=0, type="title", text="Fixture Paper")
+        )
+        db.add_all(
+            [
+                Block(
+                    version_id=version.id,
+                    page_index=0,
+                    order=index,
+                    type="paragraph",
+                    text=f"{text} author{index}@example.org",
+                )
+                for index, text in enumerate(authors, 1)
+            ]
+        )
+        db.add(Block(version_id=version.id, page_index=0, order=7, type="heading", text="Abstract"))
+        db.add(
+            Block(
+                version_id=version.id,
+                page_index=0,
+                order=8,
+                type="page_footnote",
+                text="†Work performed while at Research Lab.",
+            )
+        )
+        db.commit()
+        make_chunks(db, version.id)
+        hits = search(db, "reader", [paper.id], "Aidan Gomez Toronto", limit=2)
+        assert hits and "First Author" in hits[0]["quote"]
+        assert "Aidan Gomez · † University of Toronto" in hits[0]["quote"]
+        assert "[Author 6] Aidan Gomez" in hits[0]["quote"]
+        assert "Related first-page footnotes" in hits[0]["quote"]
+        answer = author_order_answer("第 6 作者是谁，在哪个机构工作？", hits)
+        assert "Aidan Gomez" in answer and "University of Toronto" in answer
+        assert "Research Lab" in answer
+        outline = paper_outline(db, "reader", [paper.id])
+        assert outline[0]["sections"][0]["index"] == 0
+        assert (
+            "[Author 6] Aidan Gomez"
+            in read_paper_fragment(db, "reader", paper.id, 0, 7)[0]["quote"]
+        )
+        assert read_paper_fragment(db, "other", paper.id, 0, 6) == []
+        blocks = db.scalars(select(Block).where(Block.version_id == version.id)).all()
+        passage_id = next(
+            key for key, _, text in retrieval._passages(blocks) if "First Author" in text
+        )
+        monkeypatch.setattr(retrieval, "settings", lambda: SimpleNamespace(qdrant_url="mock"))
+        monkeypatch.setattr(retrieval, "embed", lambda _texts: [[0.1, 0.2]])
+        monkeypatch.setattr(
+            retrieval,
+            "vector_client",
+            lambda: SimpleNamespace(
+                collection_exists=lambda _name: True,
+                query_points=lambda *_args, **_kwargs: SimpleNamespace(
+                    points=[SimpleNamespace(id=passage_id)]
+                ),
+            ),
+        )
+        assert (
+            "First Author"
+            in search(db, "reader", [paper.id], "unmatchedtoken", limit=1)[0]["quote"]
+        )
+
+
+def test_conversation_persists_and_can_be_deleted(monkeypatch):
+    monkeypatch.setattr("services.api.app.main.run_agent.delay", lambda _run_id: None)
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/v1/auth/login", json={"email": "demo@example.com", "password": "change-me"}
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        with SessionLocal() as db:
+            paper = Paper(owner_id="demo@example.com", title="Conversation fixture")
+            db.add(paper)
+            db.commit()
+            paper_id = paper.id
+        created = client.post(
+            "/api/v1/chat/sessions", headers=headers, json={"paper_ids": [paper_id]}
+        )
+        assert created.status_code == 200
+        session_id = created.json()["id"]
+        sent = client.post(
+            f"/api/v1/chat/sessions/{session_id}/messages",
+            headers=headers,
+            json={"content": "What is the method?"},
+        )
+        assert sent.status_code == 200
+        assert (
+            client.post(
+                f"/api/v1/chat/sessions/{session_id}/messages",
+                headers=headers,
+                json={"content": "Another question"},
+            ).status_code
+            == 409
+        )
+        with SessionLocal() as db:
+            run = db.get(AgentRun, sent.json()["run_id"])
+            run.status = "completed"
+            db.commit()
+        detail = client.get(f"/api/v1/chat/sessions/{session_id}", headers=headers).json()
+        assert detail["messages"][0]["content"] == "What is the method?"
+        assert detail["messages"][0]["status"] == "completed"
+        assert any(
+            item["id"] == session_id
+            for item in client.get("/api/v1/chat/sessions", headers=headers).json()["sessions"]
+        )
+        assert client.delete(f"/api/v1/chat/sessions/{session_id}", headers=headers).json() == {
+            "deleted": True
+        }
+        assert client.get(f"/api/v1/chat/sessions/{session_id}", headers=headers).status_code == 404
+
+
 def test_structured_comparison_uses_selected_papers_and_real_sources(monkeypatch):
     ids = ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"]
     answer = {
@@ -448,7 +725,15 @@ def test_remote_parser_adapter_preserves_equation_and_location(monkeypatch):
                         "type": "interline_equation",
                         "content": {"latex": "E=mc^2"},
                         "bbox": [100, 200, 600, 300],
-                    }
+                    },
+                    {
+                        "type": "table",
+                        "content": "<table><tr><td>28.4</td></tr></table>",
+                        "bbox": [100, 400, 600, 600],
+                        "captions": [
+                            {"content": "Table 2: BLEU scores", "bbox": [100, 350, 600, 390]}
+                        ],
+                    },
                 ],
             }
         ]
@@ -481,6 +766,11 @@ def test_remote_parser_adapter_preserves_equation_and_location(monkeypatch):
     assert blocks[0]["latex"] == "E=mc^2"
     assert blocks[0]["markdown"] == "$$\nE=mc^2\n$$"
     assert blocks[0]["bbox"] == [0.1, 0.2, 0.6, 0.3]
+    assert [(block["type"], block["text"]) for block in blocks[1:]] == [
+        ("caption", "Table 2: BLEU scores"),
+        ("table", "<table><tr><td>28.4</td></tr></table>"),
+    ]
+    assert blocks[1]["bbox"] == [0.1, 0.35, 0.6, 0.39]
 
 
 def test_local_llm_adapter_is_configured_without_cloud_dependency(monkeypatch):
@@ -496,12 +786,16 @@ def test_local_llm_adapter_is_configured_without_cloud_dependency(monkeypatch):
                 "llm_base_url": "http://localhost:11434/v1",
                 "llm_model": "local-model",
                 "llm_provider": "ollama",
+                "ollama_num_ctx": 8192,
             },
         )(),
     )
     calls = []
 
     class Response:
+        status_code = 200
+        text = ""
+
         def raise_for_status(self):
             pass
 
@@ -514,6 +808,7 @@ def test_local_llm_adapter_is_configured_without_cloud_dependency(monkeypatch):
 
     monkeypatch.setattr(ai.httpx, "post", post)
     assert ai.generate("system", "question", max_tokens=100) == "answer"
+    assert calls[0][1]["json"]["options"]["num_ctx"] == 8192
     assert calls[0][0] == "http://localhost:11434/api/chat"
     assert calls[0][1]["json"]["think"] is False
 

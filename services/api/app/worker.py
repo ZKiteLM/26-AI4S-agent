@@ -11,6 +11,7 @@ from sqlalchemy import delete, select
 from typing_extensions import TypedDict
 
 from .ai import generate
+from .chat_agent import author_order_answer, number_citations, run_react
 from .config import settings
 from .db import SessionLocal
 from .discovery import inspect_github, search_arxiv, search_external
@@ -18,6 +19,8 @@ from .models import (
     AgentRun,
     BackgroundTask,
     Block,
+    ChatMessage,
+    ChatSession,
     Chunk,
     Paper,
     Recommendation,
@@ -25,6 +28,7 @@ from .models import (
     Subscription,
     Translation,
     Version,
+    now,
 )
 from .observability import record
 from .parsing import parse_pdf
@@ -107,7 +111,7 @@ def parse_version(task_id: str, version_id: str) -> None:
             db.commit()
             chunks = make_chunks(db, version_id)
             paper = db.get(Paper, version.paper_id)
-            index_chunks(chunks, paper.id, paper.owner_id)
+            index_chunks(db, chunks, paper.id, paper.owner_id)
             task.status = version.parse_status = "completed"
             task.result = {
                 "version_id": version_id,
@@ -339,10 +343,13 @@ def _source_support(line: str, sources: list[dict]) -> bool:
     ):
         claim = claim.split("：", 1)[1].strip()
     verdict = generate(
-        "Strictly determine whether the quote directly states every claim in the answer. "
-        'If any phrase is absent, answer {"supported":false}. Return JSON only.',
+        "Check whether the quoted paper text supports every factual claim in the answer. "
+        "Explicit [Author N] labels support author order; ordinary translation and paraphrase are allowed. "
+        "A footnote marker applies only to the author bearing that marker. "
+        "Distinguish a listed affiliation from a work location stated in a footnote. "
+        'If any fact is absent or contradicted, answer {"supported":false}. Return JSON only.',
         json.dumps(
-            {"answer": claim, "quote": "\n".join(item["quote"][:1000] for item in sources)},
+            {"answer": claim, "quote": "\n".join(item["quote"][:3600] for item in sources)},
             ensure_ascii=False,
         ),
         max_tokens=120,
@@ -363,7 +370,12 @@ def _verify(state: AgentState) -> dict:
     by_id = {item["evidence_id"]: item for item in state["evidence"]}
     lines = [line.strip() for line in state["answer"].splitlines() if line.strip()]
     citations = set(re.findall(r"\[([0-9a-fA-F-]{36})\]", state["answer"]))
-    valid = bool(lines) and bool(citations) and citations.issubset(by_id)
+    valid = (
+        bool(lines)
+        and bool(citations)
+        and citations.issubset(by_id)
+        and all(re.search(r"\[[0-9a-fA-F-]{36}\]", line) for line in lines)
+    )
     checked = []
     if valid:
         for line in lines:
@@ -381,7 +393,7 @@ def _verify(state: AgentState) -> dict:
                         {
                             "question": state.get("question", ""),
                             "answer": line,
-                            "quotes": [item["quote"][:1000] for item in sources],
+                            "quotes": [item["quote"][:3600] for item in sources],
                         },
                         ensure_ascii=False,
                     ),
@@ -431,22 +443,59 @@ def run_agent(run_id: str) -> None:
         run = db.get(AgentRun, run_id)
         run.status = "running"
         db.commit()
-        initial = AgentState(
-            run_id=run.id,
-            question=run.question,
-            paper_ids=run.paper_ids,
-            owner_id=run.owner_id,
-            kind=run.kind,
-            evidence=[],
-            answer="",
-        )
     try:
-        result = research_graph.invoke(initial)
+        if run.session_id and run.kind == "chat":
+
+            def emit(name: str, data: dict) -> None:
+                with SessionLocal() as session_db:
+                    event(session_db, run_id, name, data)
+
+            draft, evidence = run_react(run, emit)
+            structured_answer = author_order_answer(run.question, evidence)
+            if structured_answer:
+                checked = structured_answer
+                emit(
+                    "tool_finished",
+                    {"tool": "verify_evidence", "valid": True, "method": "ordered_author_source"},
+                )
+            else:
+                checked = _verify(
+                    {
+                        "run_id": run_id,
+                        "question": run.question,
+                        "evidence": evidence,
+                        "answer": draft,
+                    }
+                )["answer"]
+            answer, cited = number_citations(checked, evidence)
+            result = {"answer": answer, "evidence": cited}
+        else:
+            initial = AgentState(
+                run_id=run.id,
+                question=run.question,
+                paper_ids=run.paper_ids,
+                owner_id=run.owner_id,
+                kind=run.kind,
+                evidence=[],
+                answer="",
+            )
+            result = research_graph.invoke(initial)
         with SessionLocal() as db:
             run = db.get(AgentRun, run_id)
             run.answer = result["answer"]
             run.evidence = result["evidence"]
             run.status = "completed"
+            if run.session_id:
+                db.add(
+                    ChatMessage(
+                        session_id=run.session_id,
+                        role="assistant",
+                        content=run.answer,
+                        run_id=run.id,
+                        evidence=run.evidence,
+                    )
+                )
+                db.get(ChatSession, run.session_id).updated_at = now()
             db.commit()
             event(db, run_id, "completed", {"answer": run.answer, "evidence": run.evidence})
             record("worker", "INFO", "科研任务完成", run_id=run_id)

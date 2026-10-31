@@ -24,6 +24,8 @@ from .models import (
     Artifact,
     BackgroundTask,
     Block,
+    ChatMessage,
+    ChatSession,
     Chunk,
     CitationEdge,
     Paper,
@@ -32,6 +34,7 @@ from .models import (
     Subscription,
     Translation,
     Version,
+    now,
 )
 from .observability import client as diagnostic_client
 from .observability import recent as recent_events
@@ -96,6 +99,15 @@ class LoginIn(BaseModel):
 class ChatIn(BaseModel):
     question: str = Field(min_length=2)
     paper_ids: list[str] = Field(min_length=1)
+
+
+class ChatSessionIn(BaseModel):
+    paper_ids: list[str] = Field(default_factory=list)
+
+
+class ChatMessageIn(BaseModel):
+    content: str = Field(min_length=2, max_length=8000)
+    paper_ids: list[str] | None = None
 
 
 class ResolveIn(BaseModel):
@@ -593,9 +605,152 @@ def create_run(db: Session, user: str, question: str, paper_ids: list[str], kind
     return run
 
 
+def chat_session_json(session: ChatSession) -> dict:
+    return {
+        "id": session.id,
+        "title": session.title,
+        "paper_ids": session.paper_ids,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+
+
+def owned_chat_session(db: Session, session_id: str, user: str) -> ChatSession:
+    session = db.get(ChatSession, session_id)
+    if not session or session.owner_id != user:
+        raise HTTPException(404, "Conversation not found")
+    return session
+
+
+@app.get(API + "/chat/sessions")
+def list_chat_sessions(user: str = Depends(current_user), db: Session = Depends(get_db)):
+    sessions = db.scalars(
+        select(ChatSession)
+        .where(ChatSession.owner_id == user)
+        .order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
+    ).all()
+    return {"sessions": [chat_session_json(session) for session in sessions]}
+
+
+@app.post(API + "/chat/sessions")
+def new_chat_session(
+    data: ChatSessionIn, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    for paper_id in data.paper_ids:
+        owned_paper(db, paper_id, user)
+    session = ChatSession(owner_id=user, paper_ids=list(dict.fromkeys(data.paper_ids)))
+    db.add(session)
+    db.commit()
+    return chat_session_json(session)
+
+
+@app.get(API + "/chat/sessions/{session_id}")
+def get_chat_session(
+    session_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    session = owned_chat_session(db, session_id, user)
+    messages = db.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at, ChatMessage.id)
+    ).all()
+    run_ids = [item.run_id for item in messages if item.run_id]
+    runs = {run.id: run for run in db.scalars(select(AgentRun).where(AgentRun.id.in_(run_ids)))}
+    events = db.scalars(
+        select(RunEvent).where(RunEvent.run_id.in_(run_ids)).order_by(RunEvent.sequence)
+    ).all()
+    by_run: dict[str, list[dict]] = {}
+    for item in events:
+        by_run.setdefault(item.run_id, []).append(
+            {"event": item.event, "data": item.data, "sequence": item.sequence}
+        )
+    return {
+        **chat_session_json(session),
+        "messages": [
+            {
+                "id": item.id,
+                "role": item.role,
+                "content": item.content,
+                "run_id": item.run_id,
+                "evidence": item.evidence,
+                "status": runs[item.run_id].status if item.run_id in runs else None,
+                "error": runs[item.run_id].error if item.run_id in runs else None,
+                "events": by_run.get(item.run_id, []),
+                "created_at": item.created_at,
+            }
+            for item in messages
+        ],
+    }
+
+
+@app.delete(API + "/chat/sessions/{session_id}")
+def delete_chat_session(
+    session_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    session = owned_chat_session(db, session_id, user)
+    runs = db.scalars(select(AgentRun).where(AgentRun.session_id == session_id)).all()
+    if any(run.status in ("queued", "running") for run in runs):
+        raise HTTPException(409, "Wait for the current answer before deleting this conversation")
+    run_ids = [run.id for run in runs]
+    if run_ids:
+        db.execute(delete(RunEvent).where(RunEvent.run_id.in_(run_ids)))
+    db.execute(delete(ChatMessage).where(ChatMessage.session_id == session_id))
+    db.execute(delete(AgentRun).where(AgentRun.session_id == session_id))
+    db.delete(session)
+    db.commit()
+    return {"deleted": True}
+
+
+@app.post(API + "/chat/sessions/{session_id}/messages")
+def send_chat_message(
+    session_id: str,
+    data: ChatMessageIn,
+    user: str = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    session = owned_chat_session(db, session_id, user)
+    active = db.scalar(
+        select(AgentRun.id)
+        .where(AgentRun.session_id == session_id, AgentRun.status.in_(["queued", "running"]))
+        .limit(1)
+    )
+    if active:
+        raise HTTPException(409, "Wait for the current answer")
+    paper_ids = list(
+        dict.fromkeys(data.paper_ids if data.paper_ids is not None else session.paper_ids)
+    )
+    if not paper_ids:
+        raise HTTPException(400, "Select at least one paper")
+    for paper_id in paper_ids:
+        owned_paper(db, paper_id, user)
+    question = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", data.content).strip()
+    if len(question) < 2:
+        raise HTTPException(400, "Question is too short")
+    session.paper_ids = paper_ids
+    if session.title == "新会话":
+        session.title = question[:60]
+    session.updated_at = now()
+    run = AgentRun(
+        owner_id=user,
+        session_id=session_id,
+        question=question,
+        paper_ids=paper_ids,
+        kind="chat",
+    )
+    db.add(run)
+    db.flush()
+    db.add(ChatMessage(session_id=session_id, role="user", content=question, run_id=run.id))
+    db.commit()
+    run_agent.delay(run.id)
+    return {"run_id": run.id, "session_id": session.id}
+
+
 @app.post(API + "/chat/runs")
 def start_chat(data: ChatIn, user: str = Depends(current_user), db: Session = Depends(get_db)):
-    return {"run_id": create_run(db, user, data.question, data.paper_ids, "chat").id}
+    session = new_chat_session(ChatSessionIn(paper_ids=data.paper_ids), user, db)
+    return send_chat_message(
+        session["id"], ChatMessageIn(content=data.question, paper_ids=data.paper_ids), user, db
+    )
 
 
 @app.get(API + "/chat/runs/{run_id}")

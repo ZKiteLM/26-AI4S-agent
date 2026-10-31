@@ -42,6 +42,7 @@ function Page({
   onSelectText?: Props["onSelectText"];
   onCitationClick?: Props["onCitationClick"];
 }) {
+  const pageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const layerRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState<{
@@ -59,8 +60,19 @@ function Page({
         const page: PdfPage = await document.getPage(pageIndex + 1);
         if (cancelled) return;
         const base = page.getViewport({ scale: 1 });
+        const shell = pageRef.current;
+        if (!shell) return;
+        const header = shell.querySelector<HTMLElement>(".pdf-page-number");
+        const availableWidth = Math.max(1, shell.clientWidth - 16);
+        const availableHeight = Math.max(
+          1,
+          shell.clientHeight - 16 - (header?.offsetHeight || 0),
+        );
         const view = page.getViewport({
-          scale: Math.max(0.2, (width - 28) / base.width),
+          scale: Math.min(
+            availableWidth / base.width,
+            availableHeight / base.height,
+          ),
         });
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -104,7 +116,10 @@ function Page({
     <div
       className="continuous-pdf-page"
       data-page-index={pageIndex}
-      ref={register}
+      ref={(element) => {
+        pageRef.current = element;
+        register(element);
+      }}
     >
       <div className="pdf-page-number">{pageIndex + 1}</div>
       {error && <div className="error">{error}</div>}

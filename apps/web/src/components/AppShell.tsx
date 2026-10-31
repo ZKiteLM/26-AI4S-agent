@@ -194,7 +194,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         <main
-          className={`main ${pathname.startsWith("/papers/") ? "main-reader" : ""}`}
+          className={`main ${pathname.startsWith("/papers/") ? "main-reader" : pathname === "/research" ? "main-research" : ""}`}
         >
           {children}
         </main>

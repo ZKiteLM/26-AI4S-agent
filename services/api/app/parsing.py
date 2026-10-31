@@ -14,6 +14,9 @@ import pymupdf
 from .config import settings
 
 ARXIV_RE = re.compile(r"(?<!\d)(\d{4}\.\d{4,5})(?:v(\d+))?(?!\d)")
+SPLIT_SCIENTIFIC_CELLS_RE = re.compile(
+    r"<td>(\s*[\d.]+\s*[·×]\s*)</td>\s*<td>(\s*10<sup>[-+]?\d+</sup>\s*)</td>", re.I
+)
 logger = logging.getLogger(__name__)
 
 
@@ -222,6 +225,8 @@ def _mineru_blocks(pdf_data: bytes, start: int, end: int, ocr_mode: str = "ocr")
             }.get(kind, kind)
             raw = item.get("content", "")
             markdown = _mineru_markdown(raw)
+            if kind == "table":
+                markdown = _merge_split_scientific_cells(markdown)
             latex = None
             if kind == "equation":
                 latex = str(
@@ -232,9 +237,29 @@ def _mineru_blocks(pdf_data: bytes, start: int, end: int, ocr_mode: str = "ocr")
             text = latex or markdown
             if not text.strip():
                 continue
-            bbox = item.get("bbox") or [0, 0, 1, 1]
-            if len(bbox) == 4 and max(bbox) > 1:
-                bbox = [coordinate / 1000 for coordinate in bbox]
+            bbox = _normalized_bbox(item.get("bbox"))
+            captions = []
+            if kind == "table":
+                for caption in item.get("captions") or []:
+                    caption_text = _mineru_markdown(caption.get("content", ""))
+                    if caption_text.strip():
+                        captions.append(
+                            {
+                                "page_index": index,
+                                "type": "caption",
+                                "text": caption_text,
+                                "markdown": f"**{caption_text}**",
+                                "latex": None,
+                                "bbox": _normalized_bbox(caption.get("bbox")),
+                                "section_path": [],
+                                "parser": "mineru",
+                                "confidence": None,
+                            }
+                        )
+            for caption in captions:
+                if caption["bbox"][1] <= bbox[1]:
+                    caption["order"] = len(output)
+                    output.append(caption)
             output.append(
                 {
                     "page_index": index,
@@ -249,7 +274,23 @@ def _mineru_blocks(pdf_data: bytes, start: int, end: int, ocr_mode: str = "ocr")
                     "confidence": None,
                 }
             )
+            for caption in captions:
+                if caption["bbox"][1] > bbox[1]:
+                    caption["order"] = len(output)
+                    output.append(caption)
     return output
+
+
+def _normalized_bbox(value: object) -> list[float]:
+    bbox = value if isinstance(value, list) and len(value) == 4 else [0, 0, 1, 1]
+    return [coordinate / 1000 for coordinate in bbox] if max(bbox) > 1 else bbox
+
+
+def _merge_split_scientific_cells(markdown: str) -> str:
+    return SPLIT_SCIENTIFIC_CELLS_RE.sub(
+        lambda match: f'<td colspan="2">{match.group(1).strip()} {match.group(2).strip()}</td>',
+        markdown,
+    )
 
 
 def _strip_math_delimiters(value: str) -> str:

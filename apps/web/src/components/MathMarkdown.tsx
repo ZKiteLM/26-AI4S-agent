@@ -4,6 +4,18 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+
+const schema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [["className", /^language-./, "math-inline", "math-display"]],
+    td: ["colSpan", "rowSpan"],
+    th: ["colSpan", "rowSpan"],
+  },
+};
 
 export default function MathMarkdown({ children }: { children: string }) {
   const normalized = children
@@ -18,7 +30,7 @@ export default function MathMarkdown({ children }: { children: string }) {
   return (
     <Markdown
       remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
+      rehypePlugins={[rehypeRaw, [rehypeSanitize, schema], rehypeKatex]}
     >
       {normalized}
     </Markdown>
