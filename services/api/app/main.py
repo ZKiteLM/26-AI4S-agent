@@ -688,6 +688,7 @@ def get_chat_session(
                 "created_at": item.created_at,
             }
             for item in messages
+            if item.role == "user" or (item.role == "assistant" and not item.tool_calls)
         ],
     }
 

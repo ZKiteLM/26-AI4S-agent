@@ -1,4 +1,4 @@
-"""Rebuild child passage vectors from existing parsed paper blocks.
+"""Rebuild Elasticsearch BM25 and Qdrant passage indexes from parsed blocks.
 
 Run with: uv run python scripts/reindex_retrieval.py
 """
@@ -17,18 +17,18 @@ from services.api.app.retrieval import index_chunks, remove_version_index
 
 
 def main() -> None:
-    if not settings().qdrant_url:
-        raise SystemExit("QDRANT_URL is required for vector reindexing")
+    if not settings().elasticsearch_url:
+        raise SystemExit("ELASTICSEARCH_URL is required for BM25 reindexing")
     with SessionLocal() as db:
         versions = db.scalars(select(Version)).all()
         for version in versions:
             chunks = db.scalars(select(Chunk).where(Chunk.version_id == version.id)).all()
-            if not chunks:
+            if not chunks or version.parse_status != "completed":
                 continue
             paper = db.get(Paper, version.paper_id)
             remove_version_index(version.id)
             index_chunks(db, chunks, paper.id, paper.owner_id)
-            print(f"indexed {paper.title} / {version.label}: {len(chunks)} parent chunks")
+            print(f"indexed {paper.title} / {version.label}: {len(chunks)} stored chunks")
 
 
 if __name__ == "__main__":

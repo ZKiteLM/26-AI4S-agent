@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     s3_secret_key: str = ""
     s3_bucket: str = "research"
     qdrant_url: str = ""
+    elasticsearch_url: str = ""
+    elasticsearch_api_key: str = ""
     app_secret: str = "development-only-secret"
     demo_email: str = "demo@example.com"
     demo_password: str = "change-me"
@@ -26,12 +28,10 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_provider: Literal["openai", "ollama"] = "openai"
     ollama_num_ctx: int = Field(default=16384, ge=4096, le=40960)
+    agent_max_rounds: int = Field(default=8, ge=1, le=20)
     embedding_base_url: str = ""
     embedding_api_key: str = ""
     embedding_model: str = ""
-    rerank_base_url: str = ""
-    rerank_api_key: str = ""
-    rerank_model: str = ""
     github_token: str = ""
     openalex_api_key: str = ""
     metrics_refresh_hours: int = Field(default=24, ge=1)
@@ -52,16 +52,15 @@ class Settings(BaseSettings):
             return self
         if self.llm_provider != "openai" or self.parser_backend != "remote":
             raise ValueError("Cloud mode requires LLM_PROVIDER=openai and PARSER_BACKEND=remote")
-        for name in ("llm_base_url", "embedding_base_url", "mineru_api_url", "rerank_base_url"):
+        for name in ("llm_base_url", "embedding_base_url", "mineru_api_url"):
             value = getattr(self, name)
-            if name != "rerank_base_url" or value:
-                parsed = urlparse(value)
-                if (
-                    parsed.scheme != "https"
-                    or not parsed.hostname
-                    or parsed.hostname in ("localhost", "127.0.0.1", "host.docker.internal")
-                ):
-                    raise ValueError(f"Cloud mode requires an external HTTPS {name}")
+            parsed = urlparse(value)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.hostname in ("localhost", "127.0.0.1", "host.docker.internal")
+            ):
+                raise ValueError(f"Cloud mode requires an external HTTPS {name}")
         if (
             self.app_secret in ("development-only-secret", "change-this-before-exposing-service")
             or self.demo_password == "change-me"

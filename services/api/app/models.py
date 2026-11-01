@@ -132,6 +132,9 @@ class ChatMessage(Base):
     content: Mapped[str] = mapped_column(Text)
     run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"), nullable=True)
     evidence: Mapped[list] = mapped_column(JSON, default=list)
+    tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

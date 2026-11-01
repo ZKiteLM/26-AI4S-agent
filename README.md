@@ -5,7 +5,7 @@
 ## 项目结构
 
 - `apps/web`：Next.js 前端
-- `services/api/app`：FastAPI、LangGraph、解析、检索与后台任务
+- `services/api/app`：FastAPI、ReAct Agent、解析、检索与后台任务
 - `services/api/migrations`：Alembic 数据库迁移
 - `infra`：Docker Compose、镜像与 Caddy
 - `scripts`：官方样例评测
@@ -18,11 +18,11 @@
 cp .env.example .env
 # 编辑 .env：至少设置 APP_SECRET、DEMO_PASSWORD；模型端点按下节配置。
 uv sync --extra dev --extra parser
-docker compose --env-file .env -f infra/compose.yml up -d postgres redis qdrant minio
+docker compose --env-file .env -f infra/compose.yml up -d postgres redis qdrant elasticsearch minio
 uv run alembic upgrade head
 ```
 
-Compose 的基础镜像可通过 `.env` 中的 `POSTGRES_IMAGE`、`REDIS_IMAGE`、`QDRANT_IMAGE`、`MINIO_IMAGE`、`NODE_IMAGE` 替换；这台 Mac 的 Docker Hub/Quay 拉取不稳定时，已验证预装的 `postgres:17`、`redis:7`、`cgr.dev/chainguard/minio:latest` 及 `mirror.gcr.io/library/node:24-alpine` 可用。
+Compose 的基础镜像可通过 `.env` 中的 `POSTGRES_IMAGE`、`REDIS_IMAGE`、`QDRANT_IMAGE`、`ELASTICSEARCH_IMAGE`、`MINIO_IMAGE`、`NODE_IMAGE` 替换；这台 Mac 的 Docker Hub/Quay 拉取不稳定时，已验证预装的 `postgres:17`、`redis:7`、`cgr.dev/chainguard/minio:latest` 及 `mirror.gcr.io/library/node:24-alpine` 可用。
 
 分别在终端启动服务：
 
@@ -40,13 +40,13 @@ cd apps/web && npm ci && npm run dev
 
 论文详情页使用固定视口的 PDF 阅读工作区，页面本身不滚动。左侧文献大纲可在章节目录和 PDF 缩略图之间切换，也可收起；中间 PDF 阅读器始终保留。右侧“划词翻译”和“双语滚动”最多打开一个，“AI 问答”可独立开关；三个工具全部关闭时就是专注阅读。只有打开“划词翻译”后，选中的 PDF 文字才会进入翻译侧栏。主导航可折叠，拖动面板分隔条或用方向键调整宽度，“恢复默认比例”可重置布局。引用只有点击 PDF 中的编号文字才跳转，跳转后可返回引用处。双语滚动时 PDF 与译文按内容块联动；PDF 仅渲染视口附近页面，内容块和已缓存译文按页加载。“翻译当前页”只翻译未缓存的内容块，结果持久化。MinerU 解析的独立公式以 LaTeX 保存，行内公式会在翻译时保留，译文用 KaTeX 渲染。旧版本可在论文详情页重新解析；与旧内容完全一致的段落译文缓存会被保留，发生变化的内容需要重新翻译。
 
-科研问答使用持久化会话：可新建、删除并在刷新后继续追问。每条消息对应一次有上限的 ReAct 工具循环；模型可在一轮中提交最多 4 个 query 并发调用文献检索，也可根据文档大纲中的块索引调用 `read_paper` 阅读指定位置的连续原文。检索采用约 520 字的小片段 BM25 与向量召回，并用 RRF 融合；返回其所在的较大父块作为证据。界面在答案前显示可折叠的工具过程，每次新增证据也可展开查看；最终引用按当前答案重新编号为 `[1]`、`[2]`，点击来源卡片可回到 PDF 原文。运行记录、消息与证据保存在数据库中；模型服务不可用时会显示失败原因和重新提问入口。已有解析数据升级后运行 `uv run python scripts/reindex_retrieval.py` 重建小片段向量索引。
+科研问答使用持久化会话：可新建、删除并在刷新后继续追问。标准 ReAct 循环保存 assistant tool calls 和对应结果；模型可并行调用 `search_bm25`、`search_semantic`，用 `read` 按 Block Index 阅读原文，或用启用 Thinking 的 `plan` 获取检索策略。Elasticsearch 持久化 BM25 倒排索引，Qdrant 持久化向量索引，两者直接返回命中片段；PDF 解析完成时建立索引。界面在答案前显示可折叠的工具过程，每次新增证据也可展开查看；最终引用按当前答案重新编号为 `[1]`、`[2]`，点击来源卡片可回到 PDF 原文。升级后先启动 Elasticsearch，设置 `ELASTICSEARCH_URL`，运行 `uv run alembic upgrade head` 和 `uv run python scripts/reindex_retrieval.py` 为已有论文重建索引。
 
-研究主题追踪由 Celery Beat 每日刷新；新增订阅会立即排入默认 Worker。订阅可暂停、恢复或手动刷新。检索近 30 天的 OpenAlex 和 arXiv 论文，结果存入独立的 `paper_candidates`，不会自动进入个人 `papers` 文献库。摘要经小批量 LLM 评分，引用量和 GitHub Stars 只取实际可验证的数据；缺失的客观指标在评分时重新分配权重。推荐页展示摘要、理由和评分明细，支持主题、状态、分页及反馈。只有用户点击“入库”才创建正式文献并尝试下载解析 PDF。LLM 暂不可用时总分显示“待评分”，客观指标仍可查看；后续刷新会重试尚未评分的推荐和缺失的外部指标。OpenAlex 或 arXiv 其中一方失败时不推进增量检索时间。
+研究主题追踪由 Celery Beat 定期检查各订阅的默认 7 天自动刷新周期；新增订阅会立即排入默认 Worker。订阅可暂停、恢复或手动刷新。检索近 30 天的 OpenAlex 和 arXiv 论文，结果存入独立的 `paper_candidates`，不会自动进入个人 `papers` 文献库。摘要经小批量 LLM 评分，引用量和 GitHub Stars 只取实际可验证的数据；缺失的客观指标在评分时重新分配权重。推荐页展示摘要、理由和评分明细，支持主题、状态、分页及反馈。只有用户点击“入库”才创建正式文献并尝试下载解析 PDF。LLM 暂不可用时总分显示“待评分”，客观指标仍可查看；后续刷新会重试尚未评分的推荐和缺失的外部指标。OpenAlex 或 arXiv 其中一方失败时不推进增量检索时间。
 
 ### 本地模型与云端 API 切换
 
-LLM、Embedding、Reranker 和扫描件 OCR 有独立配置。开发机可运行 Ollama 等兼容 OpenAI 接口的服务；示例：
+LLM、Embedding 和扫描件 OCR 有独立配置。开发机可运行 Ollama 等兼容 OpenAI 接口的服务；示例：
 
 ```bash
 ollama serve
@@ -54,7 +54,7 @@ ollama pull qwen3:8b
 ollama pull bge-m3
 ```
 
-在 `.env` 中设置 `LLM_PROVIDER=ollama`、`LLM_BASE_URL=http://localhost:11434/v1`、`LLM_MODEL=qwen3:8b`、`OLLAMA_NUM_CTX=16384`、`EMBEDDING_BASE_URL=http://localhost:11434/v1`、`EMBEDDING_MODEL=bge-m3`。16K 是应用请求的上下文窗口，低于该模型提供的 40K 上限；可根据实际内存与延迟调整。Ollama 适配器使用原生接口并关闭思考输出；云端设 `LLM_PROVIDER=openai` 并填外部兼容 API 地址。本机 API 直接运行时使用 `localhost`；API 容器访问宿主机模型时使用 `host.docker.internal`。Reranker 可设置兼容 `/rerank` 的服务；未设置时使用混合召回结果。
+在 `.env` 中设置 `LLM_PROVIDER=ollama`、`LLM_BASE_URL=http://localhost:11434/v1`、`LLM_MODEL=qwen3:8b`、`OLLAMA_NUM_CTX=16384`、`EMBEDDING_BASE_URL=http://localhost:11434/v1`、`EMBEDDING_MODEL=bge-m3`。16K 是应用请求的上下文窗口，低于该模型提供的 40K 上限；可根据实际内存与延迟调整。Ollama 适配器使用原生工具调用；主 Agent 关闭 Thinking，`plan` 工具单独启用 Thinking；云端设 `LLM_PROVIDER=openai` 并填外部兼容 API 地址。本机 API 直接运行时使用 `localhost`；API 容器访问宿主机模型时使用 `host.docker.internal`。问答检索使用 Elasticsearch BM25 与 Qdrant 向量索引，由 Agent 自主选择工具。
 
 扫描 PDF 使用本机 MinerU Worker：`uv run mineru-kit models download --tier basic` 后以 `PARSER_BACKEND=local` 运行。默认对 50 页以内的矢量 PDF 也做版式增强，提取公式 LaTeX 和表格；长文档使用分批 PyMuPDF 解析。需要增强长论文公式时可调高 `PARSER_VECTOR_MAX_PAGES`，解析耗时与模型调用量会相应增加。如需快速开发测试，可设 `PARSER_VECTOR_ENHANCE=0`。公网部署时将 `LLM_*`、`EMBEDDING_*`、`RERANK_*` 指向云端服务，并设置 `PARSER_BACKEND=remote`、`MINERU_API_URL`、`MINERU_API_KEY`；业务代码和数据模型无需更改。远程解析适配 MinerU V1 `/v1/file_parse`；所选服务需要支持该接口。[接口说明](https://github.com/opendatalab/MinerU/blob/master/docs/en/usage/http_api.md)
 

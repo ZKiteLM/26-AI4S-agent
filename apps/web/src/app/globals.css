@@ -2404,6 +2404,9 @@ h3 {
   width: 100%;
   min-width: 0;
 }
+.chat-trace-plan {
+  white-space: pre-wrap;
+}
 .chat-trace .chat-trace-evidence > summary {
   color: var(--muted);
   font-weight: 500;

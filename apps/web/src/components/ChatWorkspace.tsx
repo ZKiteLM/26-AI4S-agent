@@ -120,13 +120,29 @@ function Trace({
             new_sources: number;
             sources?: Preview[];
           }[];
-          const isRead = call.data.tool === "read_paper";
+          const isRead = call.data.tool === "read";
+          const isPlan = call.data.tool === "plan";
+          const label =
+            call.data.tool === "search_bm25"
+              ? "BM25 检索"
+              : call.data.tool === "search_semantic"
+                ? "语义检索"
+                : isRead
+                  ? "阅读原文"
+                  : "规划检索";
           return (
             <li key={call.sequence}>
-              <strong>
-                第 {round} 步 · {isRead ? "阅读原文" : "检索"}
-              </strong>
-              {isRead ? (
+              <strong>第 {round} 步 · {label}</strong>
+              {isPlan ? (
+                result && (
+                  <details className="chat-trace-evidence">
+                    <summary>查看检索计划</summary>
+                    <p className="chat-trace-plan">
+                      {String(result.data.plan || result.data.error || "规划未返回内容")}
+                    </p>
+                  </details>
+                )
+              ) : isRead ? (
                 <div className="chat-trace-read">
                   <code>
                     文档位置 {Number(call.data.start)} · 连读{" "}
@@ -136,8 +152,6 @@ function Trace({
                     <details className="chat-trace-evidence">
                       <summary>
                         新增 {Number(result.data.new_sources || 0)} 条证据
-                        {Number(result.data.expanded_sources || 0) > 0 &&
-                          ` · 扩展 ${Number(result.data.expanded_sources)} 条`}
                       </summary>
                       <Sources
                         sources={(result.data.sources || []) as Preview[]}
@@ -164,6 +178,9 @@ function Trace({
                     );
                   })}
                 </ul>
+              )}
+              {result && Boolean(result.data.error) && !isPlan && (
+                <p className="chat-trace-empty">{String(result.data.error)}</p>
               )}
             </li>
           );

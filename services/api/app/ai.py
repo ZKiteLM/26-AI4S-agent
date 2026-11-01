@@ -1,3 +1,6 @@
+import json
+from uuid import uuid4
+
 import httpx
 from openai import OpenAI
 
@@ -52,6 +55,93 @@ def generate(system: str, prompt: str, max_tokens: int = 1200, json_mode: bool =
     return response.choices[0].message.content or ""
 
 
+def chat_with_tools(
+    messages: list[dict], tools: list[dict], *, thinking: bool = False, json_mode: bool = False
+) -> dict:
+    """Return one canonical assistant message, preserving native tool calls."""
+    cfg = settings()
+    if not cfg.llm_base_url or not cfg.llm_model:
+        raise RuntimeError("LLM endpoint is not configured")
+    if cfg.llm_provider == "ollama":
+        native = []
+        for message in messages:
+            item = dict(message)
+            if item["role"] == "tool":
+                item.pop("tool_call_id", None)
+            else:
+                item.pop("tool_name", None)
+            if item.get("tool_calls"):
+                item["tool_calls"] = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": call["function"]["name"],
+                            "arguments": json.loads(call["function"]["arguments"]),
+                        },
+                    }
+                    for call in item["tool_calls"]
+                ]
+            native.append(item)
+        payload = {
+            "model": cfg.llm_model,
+            "messages": native,
+            "tools": tools,
+            "stream": False,
+            "think": thinking,
+            "options": {
+                "temperature": 0,
+                "num_predict": 3500 if thinking else 900,
+                "num_ctx": cfg.ollama_num_ctx,
+            },
+        }
+        if json_mode:
+            payload["format"] = "json"
+        response = httpx.post(
+            cfg.llm_base_url.removesuffix("/v1").rstrip("/") + "/api/chat",
+            json=payload,
+            timeout=150 if thinking else 90,
+        )
+        response.raise_for_status()
+        reply = response.json()["message"]
+        calls = [
+            {
+                "id": call.get("id") or str(uuid4()),
+                "type": "function",
+                "function": {
+                    "name": call["function"]["name"],
+                    "arguments": json.dumps(
+                        call["function"].get("arguments") or {}, ensure_ascii=False
+                    ),
+                },
+            }
+            for call in reply.get("tool_calls") or []
+        ]
+        return {"role": "assistant", "content": reply.get("content") or "", "tool_calls": calls}
+    kwargs = {
+        "model": cfg.llm_model,
+        "messages": [
+            {key: value for key, value in message.items() if key != "tool_name"}
+            for message in messages
+        ],
+        "temperature": 0,
+        "max_tokens": 3500 if thinking else 900,
+    }
+    if tools:
+        kwargs["tools"] = tools
+    if thinking:
+        kwargs["reasoning_effort"] = "medium"
+        kwargs.pop("temperature")
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    response = _client(cfg.llm_base_url, cfg.llm_api_key).chat.completions.create(**kwargs)
+    reply = response.choices[0].message
+    return {
+        "role": "assistant",
+        "content": reply.content or "",
+        "tool_calls": [call.model_dump(exclude_none=True) for call in reply.tool_calls or []],
+    }
+
+
 def embed(texts: list[str]) -> list[list[float]] | None:
     cfg = settings()
     if not cfg.embedding_base_url or not cfg.embedding_model or not texts:
@@ -60,17 +150,3 @@ def embed(texts: list[str]) -> list[list[float]] | None:
         model=cfg.embedding_model, input=texts
     )
     return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
-
-
-def rerank(query: str, texts: list[str]) -> list[int]:
-    cfg = settings()
-    if not cfg.rerank_base_url or not cfg.rerank_model:
-        return list(range(len(texts)))
-    response = httpx.post(
-        cfg.rerank_base_url.rstrip("/") + "/rerank",
-        headers={"Authorization": f"Bearer {cfg.rerank_api_key or 'local'}"},
-        json={"model": cfg.rerank_model, "query": query, "documents": texts},
-        timeout=90,
-    )
-    response.raise_for_status()
-    return [x["index"] for x in response.json()["results"]]

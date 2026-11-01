@@ -18,6 +18,14 @@ services:
     image: ${QDRANT_IMAGE:-ghcr.io/qdrant/qdrant/qdrant:v1.20.0}
     ports: ["127.0.0.1:6333:6333"]
     volumes: [qdrant_data:/qdrant/storage]
+  elasticsearch:
+    image: ${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:8.17.10}
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["127.0.0.1:9200:9200"]
+    volumes: [elasticsearch_data:/usr/share/elasticsearch/data]
   minio:
     image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}
     command: server /data --console-address :9001
@@ -36,6 +44,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       QDRANT_URL: http://qdrant:6333
+      ELASTICSEARCH_URL: http://elasticsearch:9200
     ports: ["127.0.0.1:8000:8000"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -50,6 +59,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       QDRANT_URL: http://qdrant:6333
+      ELASTICSEARCH_URL: http://elasticsearch:9200
     depends_on: [api]
   parser:
     profiles: ["cloud"]
@@ -63,6 +73,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       QDRANT_URL: http://qdrant:6333
+      ELASTICSEARCH_URL: http://elasticsearch:9200
       PARSER_BACKEND: remote
     depends_on: [api]
   beat:
@@ -76,6 +87,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       QDRANT_URL: http://qdrant:6333
+      ELASTICSEARCH_URL: http://elasticsearch:9200
     depends_on: [api]
   web:
     build:
@@ -99,6 +111,7 @@ services:
 volumes:
   postgres_data:
   qdrant_data:
+  elasticsearch_data:
   minio_data:
   caddy_data:
   caddy_config:
