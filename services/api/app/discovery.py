@@ -7,6 +7,11 @@ import httpx
 from .config import settings
 
 
+def openalex_headers() -> dict[str, str]:
+    key = settings().openalex_api_key.strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 def search_external(query: str, limit: int = 10, from_date: date | None = None) -> list[dict]:
     params = {"search": query, "per-page": min(limit, 25), "sort": "publication_date:desc"}
     if from_date:
@@ -14,6 +19,7 @@ def search_external(query: str, limit: int = 10, from_date: date | None = None) 
     response = httpx.get(
         "https://api.openalex.org/works",
         params=params,
+        headers=openalex_headers(),
         timeout=20,
     )
     response.raise_for_status()
@@ -84,34 +90,153 @@ def search_arxiv(query: str, limit: int = 10, from_date: date | None = None) -> 
     return papers
 
 
-def openalex_metrics(doi: str | None, arxiv_id: str | None, openalex_id: str | None = None) -> dict:
-    """Find an OpenAlex match for arXiv metadata without inventing a citation count."""
-    if not doi and not arxiv_id and not openalex_id:
-        return {}
-    try:
-        if openalex_id and re.fullmatch(r"https://openalex\.org/W\d+", openalex_id):
-            response = httpx.get(
-                "https://api.openalex.org/works/" + openalex_id.rsplit("/", 1)[-1],
-                timeout=15,
-            )
-            response.raise_for_status()
-            work = response.json()
-            return {"openalex_id": work.get("id"), "citation_count": work.get("cited_by_count")}
-        params = {"filter": f"doi:{doi}"} if doi else {"search": f"arxiv {arxiv_id}"}
-        response = httpx.get(
-            "https://api.openalex.org/works", params={**params, "per-page": 5}, timeout=15
+def _same_paper(
+    work: dict, title: str | None, authors: list | None, year: int | None, *, exact_id: bool = False
+) -> bool:
+    from difflib import SequenceMatcher
+
+    if title:
+        normalize = lambda value: re.sub(r"[^\w]+", "", value.casefold())
+        if (
+            SequenceMatcher(
+                None,
+                normalize(work.get("display_name") or work.get("title") or ""),
+                normalize(title),
+            ).ratio()
+            < 0.94
+        ):
+            return False
+    work_year = work.get("publication_year") or work.get("year")
+    if year and work_year and abs(year - work_year) > 1:
+        return False
+    listed = work.get("authorships") or work.get("authors") or []
+    found = {
+        ((x.get("author") or {}).get("display_name") or x.get("name") or "").split()[-1].casefold()
+        for x in listed
+        if isinstance(x, dict)
+    }
+    expected = {name.split()[-1].casefold() for name in authors or [] if name.strip()}
+    return not expected or (not found and exact_id) or bool(found & expected)
+
+
+def _doi(value: str | None) -> str | None:
+    return value.lower().removeprefix("https://doi.org/").removeprefix("doi:") if value else None
+
+
+def _arxiv_location(work: dict, arxiv_id: str) -> bool:
+    urls = [
+        work.get("primary_location"),
+        work.get("best_oa_location"),
+        *(work.get("locations") or []),
+    ]
+    for item in urls:
+        if isinstance(item, dict):
+            for key in ("landing_page_url", "pdf_url"):
+                if _arxiv_id(item.get(key) or "") == arxiv_id and "arxiv.org" in (
+                    item.get(key) or ""
+                ):
+                    return True
+    return _arxiv_id(str((work.get("ids") or {}).get("arxiv") or "")) == arxiv_id
+
+
+def citation_metrics(
+    doi: str | None,
+    arxiv_id: str | None,
+    openalex_id: str | None = None,
+    *,
+    title: str | None = None,
+    authors: list | None = None,
+    year: int | None = None,
+) -> dict:
+    """Use one validated source; distinguish actual zero, no match and API errors."""
+    from .external_http import ExternalError, json_get
+
+    errors = 0
+    normalized_doi = _doi(doi)
+    queries = []
+    if openalex_id and re.fullmatch(r"(?:https://openalex\.org/)?W\d+", openalex_id):
+        queries.append(
+            (f"https://api.openalex.org/works/{openalex_id.rsplit('/', 1)[-1]}", None, "id")
         )
-        response.raise_for_status()
-        for work in response.json().get("results", []):
-            ids = work.get("ids") or {}
-            matched = (doi and (work.get("doi") or "").lower() == doi.lower()) or (
-                arxiv_id and arxiv_id in str(ids.get("arxiv") or "")
+    if normalized_doi:
+        queries.append(
+            (
+                "https://api.openalex.org/works",
+                {"filter": f"doi:{normalized_doi}", "per-page": 5},
+                "doi",
             )
-            if matched:
-                return {"openalex_id": work.get("id"), "citation_count": work.get("cited_by_count")}
-    except httpx.HTTPError:
-        pass
-    return {}
+        )
+    if arxiv_id:
+        queries.append(
+            ("https://api.openalex.org/works", {"search": arxiv_id, "per-page": 10}, "arxiv")
+        )
+    if title:
+        queries.append(
+            ("https://api.openalex.org/works", {"search": title, "per-page": 10}, "title")
+        )
+    for url, params, mode in queries:
+        try:
+            data = json_get(url, params=params, headers=openalex_headers())
+            works = data.get("results", []) if mode != "id" else [data]
+            for work in works:
+                if not isinstance(work, dict):
+                    continue
+                match = (
+                    mode == "id"
+                    or mode == "doi"
+                    and _doi(work.get("doi")) == normalized_doi
+                    or mode == "arxiv"
+                    and _arxiv_location(work, arxiv_id)
+                    or mode == "title"
+                    and _same_paper(work, title, authors, year)
+                )
+                if match and _same_paper(
+                    work, title, authors, year, exact_id=mode in ("id", "doi", "arxiv")
+                ):
+                    count = work.get("cited_by_count")
+                    if isinstance(count, int) and count >= 0:
+                        return {
+                            "citation_count": count,
+                            "citation_source": "openalex",
+                            "openalex_id": work.get("id"),
+                            "status": "found",
+                        }
+        except ExternalError as exc:
+            if "404" not in str(exc):
+                errors += 1
+    for identifier in ([f"ARXIV:{arxiv_id}"] if arxiv_id else []) + (
+        [f"DOI:{normalized_doi}"] if normalized_doi else []
+    ):
+        try:
+            data = json_get(
+                f"https://api.semanticscholar.org/graph/v1/paper/{identifier}",
+                params={"fields": "title,year,authors,externalIds,citationCount"},
+            )
+            identifiers = data.get("externalIds") or {}
+            matches_id = (
+                identifier.startswith("ARXIV:")
+                and identifiers.get("ArXiv") == arxiv_id
+                or identifier.startswith("DOI:")
+                and _doi(identifiers.get("DOI")) == normalized_doi
+            )
+            if matches_id and _same_paper(data, title, authors, year, exact_id=True):
+                count = data.get("citationCount")
+                if isinstance(count, int) and count >= 0:
+                    return {
+                        "citation_count": count,
+                        "citation_source": "semantic_scholar",
+                        "status": "found",
+                    }
+        except ExternalError as exc:
+            if "404" not in str(exc):
+                errors += 1
+    return {"status": "error" if errors else "not_found"}
+
+
+def openalex_metrics(
+    doi: str | None, arxiv_id: str | None, openalex_id: str | None = None, **kwargs
+) -> dict:
+    return citation_metrics(doi, arxiv_id, openalex_id, **kwargs)
 
 
 def _arxiv_id(value: str) -> str | None:
@@ -147,27 +272,3 @@ def safe_pdf_download(url: str) -> bytes:
                 raise ValueError("Remote file is too large or is not a PDF")
             return response.content
     raise ValueError("Too many redirects")
-
-
-def inspect_github(text: str) -> dict:
-    match = re.search(r"https?://github\.com/([\w.-]+)/([\w.-]+)", text)
-    if not match:
-        return {"repository": None, "verified": False}
-    owner, repo = match.group(1), match.group(2).rstrip(".,;:)]}").removesuffix(".git")
-    headers = (
-        {"Authorization": f"Bearer {settings().github_token}"} if settings().github_token else {}
-    )
-    try:
-        response = httpx.get(
-            f"https://api.github.com/repos/{owner}/{repo}", headers=headers, timeout=15
-        )
-        response.raise_for_status()
-        metadata = response.json()
-        return {
-            "repository": metadata.get("html_url"),
-            "verified": True,
-            "stars": metadata.get("stargazers_count", 0),
-            "updated_at": metadata.get("updated_at"),
-        }
-    except httpx.HTTPError:
-        return {"repository": f"https://github.com/{owner}/{repo}", "verified": False}

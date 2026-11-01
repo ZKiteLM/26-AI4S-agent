@@ -177,6 +177,15 @@ class Subscription(Base):
     topic: Mapped[str] = mapped_column(String(255))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    keywords: Mapped[list] = mapped_column(JSON, default=list)
+    last_auto_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_status: Mapped[str] = mapped_column(String(20), default="idle")
+    refresh_token: Mapped[str | None] = mapped_column(String(36))
+    refresh_mode: Mapped[str | None] = mapped_column(String(20))
+    refresh_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_error: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PaperCandidate(Base):
@@ -197,6 +206,19 @@ class PaperCandidate(Base):
     github_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     citation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     github_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    project_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    github_source: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    github_verification: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    github_stars_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    code_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    code_check_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    citation_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    citation_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    citation_check_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -212,6 +234,8 @@ class Recommendation(Base):
     reasons: Mapped[dict] = mapped_column(JSON, default=dict)
     feedback: Mapped[int] = mapped_column(Integer, default=0)
     topics: Mapped[list] = mapped_column(JSON, default=list)
+    matched_keywords: Mapped[dict] = mapped_column(JSON, default=dict)
+    topic_analyses: Mapped[dict] = mapped_column(JSON, default=dict)
     relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     value_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     summary: Mapped[str] = mapped_column(Text, default="")

@@ -104,8 +104,12 @@ def _search_title(title: str) -> list[dict]:
 
 def _references(openalex_id: str) -> list[str]:
     try:
+        from .discovery import openalex_headers
+
         response = httpx.get(
-            "https://api.openalex.org/works/" + openalex_id.rsplit("/", 1)[-1], timeout=20
+            "https://api.openalex.org/works/" + openalex_id.rsplit("/", 1)[-1],
+            headers=openalex_headers(),
+            timeout=20,
         )
         response.raise_for_status()
         return response.json().get("referenced_works", [])

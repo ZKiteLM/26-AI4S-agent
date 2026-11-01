@@ -4,14 +4,16 @@ import json
 import logging
 import math
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .ai import generate
-from .discovery import inspect_github, openalex_metrics
+from .config import settings
+from .discovery import citation_metrics
 from .models import PaperCandidate, Recommendation, now
+from .resolve_paper_code import resolve_paper_code
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +88,7 @@ def weighted_score(candidate: PaperCandidate, analysis: dict | None) -> tuple[fl
         if candidate.citation_count is not None
         else None,
         "github_stars": min(100, 20 * math.log1p(candidate.github_stars))
-        if candidate.github_stars is not None
+        if candidate.github_stars is not None and candidate.github_verification == "verified"
         else None,
         "recency": max(0, 100 * math.exp(-age_years / 3)) if age_days is not None else None,
     }
@@ -134,21 +136,116 @@ def upsert_candidate(db: Session, work: dict) -> PaperCandidate:
     published = work.get("published_at")
     if published and not candidate.published_at:
         candidate.published_at = datetime.fromisoformat(published[:10])
+    if (
+        work.get("citation_count") is not None
+        and work.get("source") == "OpenAlex"
+        and candidate.citation_updated_at is None
+    ):
+        candidate.citation_source = "openalex"
+        candidate.citation_updated_at = now()
+        candidate.citation_check_status = "found"
     candidate.updated_at = now()
     return candidate
 
 
-def enrich_candidate(candidate: PaperCandidate) -> None:
-    if candidate.citation_count is None and (
-        candidate.doi or candidate.arxiv_id or candidate.openalex_id
+def _due(checked: datetime | None, status: str | None, *, code: bool = False) -> bool:
+    if checked is None:
+        return True
+    config = settings()
+    hours = (
+        config.external_error_retry_hours
+        if status == "error"
+        else config.code_retry_days * 24
+        if code and status == "not_found"
+        else config.metrics_refresh_hours
+    )
+    return now().replace(tzinfo=None) - checked.replace(tzinfo=None) >= timedelta(hours=hours)
+
+
+def enrichment_due(candidate: PaperCandidate) -> bool:
+    return _due(candidate.citation_updated_at, candidate.citation_check_status) or _due(
+        candidate.code_checked_at, candidate.code_check_status, code=True
+    )
+
+
+def enrich_candidate(candidate: PaperCandidate) -> bool:
+    """Refresh external evidence once per candidate, without touching LLM analysis."""
+    before = (candidate.citation_count, candidate.github_stars, candidate.github_verification)
+    if _due(candidate.citation_updated_at, candidate.citation_check_status):
+        metrics = citation_metrics(
+            candidate.doi,
+            candidate.arxiv_id,
+            candidate.openalex_id,
+            title=candidate.title,
+            authors=candidate.authors,
+            year=candidate.year,
+        )
+        candidate.citation_check_status = metrics["status"]
+        candidate.citation_updated_at = now()
+        if metrics["status"] == "found":
+            candidate.citation_count = metrics["citation_count"]
+            candidate.citation_source = metrics["citation_source"]
+            candidate.openalex_id = candidate.openalex_id or metrics.get("openalex_id")
+    if _due(candidate.code_checked_at, candidate.code_check_status, code=True):
+        code = resolve_paper_code(
+            title=candidate.title,
+            abstract=candidate.abstract,
+            arxiv_id=candidate.arxiv_id,
+            doi=candidate.doi,
+            source_url=candidate.source_url,
+        )
+        candidate.code_check_status = code["status"]
+        candidate.code_checked_at = now()
+        candidate.project_page_url = code.get("project_page_url") or candidate.project_page_url
+        # Preserve an existing verified official repository over weaker evidence.
+        if code.get("repository") and (
+            candidate.github_verification != "verified" or code["verification"] == "verified"
+        ):
+            candidate.github_url = code["repository"]
+            candidate.github_source = code["source"]
+            candidate.github_verification = code["verification"]
+            candidate.github_stars = code.get("stars")
+            candidate.github_stars_updated_at = now() if code.get("stars") is not None else None
+    candidate.updated_at = now()
+    return before != (
+        candidate.citation_count,
+        candidate.github_stars,
+        candidate.github_verification,
+    )
+
+
+def recompute_recommendation(
+    rec: Recommendation, candidate: PaperCandidate, *, allow_legacy: bool = True
+) -> None:
+    analyses = [
+        item
+        for item in (rec.topic_analyses or {}).values()
+        if isinstance(item, dict)
+        and item.get("relevance_score") is not None
+        and item.get("value_score") is not None
+    ]
+    if analyses:
+        best = max(analyses, key=lambda item: item["relevance_score"])
+        rec.relevance_score, rec.value_score = best["relevance_score"], best["value_score"]
+        rec.summary, rec.reason = best.get("summary", ""), best.get("reason", "")
+    elif not allow_legacy:
+        rec.relevance_score = rec.value_score = None
+        rec.summary = rec.reason = ""
+    analysis = (
+        {"relevance_score": rec.relevance_score, "value_score": rec.value_score}
+        if rec.relevance_score is not None and rec.value_score is not None
+        else None
+    )
+    rec.score, rec.reasons = weighted_score(candidate, analysis)
+    if analysis is None:
+        rec.score = None
+
+
+def refresh_candidate_scores(db: Session, candidate: PaperCandidate) -> None:
+    for rec in db.scalars(
+        select(Recommendation).where(Recommendation.candidate_id == candidate.id)
     ):
-        metrics = openalex_metrics(candidate.doi, candidate.arxiv_id, candidate.openalex_id)
-        candidate.openalex_id = candidate.openalex_id or metrics.get("openalex_id")
-        candidate.citation_count = metrics.get("citation_count")
-    if candidate.github_stars is None:
-        code = inspect_github(candidate.abstract + " " + (candidate.source_url or ""))
-        candidate.github_url = code.get("repository")
-        candidate.github_stars = code.get("stars") if code.get("verified") else None
+        recompute_recommendation(rec, candidate)
 
 
 def upsert_recommendation(
@@ -157,6 +254,7 @@ def upsert_recommendation(
     topic: str,
     candidate: PaperCandidate,
     analysis: dict | None = None,
+    matched_keywords: list[str] | None = None,
 ) -> Recommendation:
     rec = db.scalar(
         select(Recommendation).where(
@@ -175,18 +273,15 @@ def upsert_recommendation(
         db.add(rec)
     if topic not in rec.topics:
         rec.topics = [*rec.topics, topic]
+    if matched_keywords:
+        matches = dict(rec.matched_keywords or {})
+        matches[topic] = list(dict.fromkeys([*(matches.get(topic) or []), *matched_keywords]))
+        rec.matched_keywords = matches
     if rec.status != "pending":
         return rec
-    if analysis and (
-        rec.relevance_score is None or analysis["relevance_score"] >= rec.relevance_score
-    ):
-        rec.relevance_score = analysis["relevance_score"]
-        rec.value_score = analysis["value_score"]
-        rec.summary = analysis["summary"]
-        rec.reason = analysis["reason"]
-    if rec.relevance_score is not None:
-        analysis = {"relevance_score": rec.relevance_score, "value_score": rec.value_score}
-    rec.score, rec.reasons = weighted_score(candidate, analysis)
-    if rec.relevance_score is None or rec.value_score is None:
-        rec.score = None
+    if analysis:
+        by_topic = dict(rec.topic_analyses or {})
+        by_topic[topic] = analysis
+        rec.topic_analyses = by_topic
+    recompute_recommendation(rec, candidate)
     return rec

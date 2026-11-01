@@ -41,10 +41,12 @@ from .observability import client as diagnostic_client
 from .observability import recent as recent_events
 from .observability import record
 from .parsing import identify_pdf, similarity
+from .recommender import recompute_recommendation, weighted_score
 from .retrieval import remove_version_index
 from .storage import Storage
+from .subscription_keywords import generate_keywords, normalize_keywords
 from .translation import translate_blocks, translate_text
-from .worker import celery_app, parse_version, refresh_subscriptions, run_agent
+from .worker import celery_app, enqueue_subscription_refresh, parse_version, run_agent
 
 
 @asynccontextmanager
@@ -146,11 +148,13 @@ class DiagramIn(BaseModel):
 
 
 class SubscriptionIn(BaseModel):
-    topic: str = Field(min_length=2)
+    topic: str = Field(min_length=2, max_length=255)
+    keywords: list[str] | None = None
 
 
 class SubscriptionUpdateIn(BaseModel):
-    active: bool
+    active: bool | None = None
+    keywords: list[str] | None = None
 
 
 class FeedbackIn(BaseModel):
@@ -855,8 +859,12 @@ def import_paper(data: ImportIn, user: str = Depends(current_user), db: Session 
     elif data.openalex_id and re.fullmatch(r"https://openalex.org/W\d+", data.openalex_id):
         import httpx
 
+        from .discovery import openalex_headers
+
         work = httpx.get(
-            "https://api.openalex.org/works/" + data.openalex_id.rsplit("/", 1)[-1], timeout=20
+            "https://api.openalex.org/works/" + data.openalex_id.rsplit("/", 1)[-1],
+            headers=openalex_headers(),
+            timeout=20,
         )
         work.raise_for_status()
         metadata = work.json()
@@ -913,12 +921,46 @@ def persist_discovered_paper(db: Session, paper: Paper, pdf_url: str | None, use
     return {"paper_id": paper.id, "task_id": task.id, "status": "queued"}
 
 
+def subscription_json(sub: Subscription) -> dict:
+    return {
+        "id": sub.id,
+        "topic": sub.topic,
+        "keywords": sub.keywords or [sub.topic],
+        "active": sub.active,
+        "last_checked_at": sub.last_checked_at,
+        "next_refresh_at": sub.next_refresh_at if sub.active else None,
+        "refresh_status": sub.refresh_status,
+        "refresh_mode": sub.refresh_mode,
+        "refresh_error": sub.refresh_error,
+        "refresh_requested_at": sub.refresh_requested_at,
+    }
+
+
+@app.post(API + "/subscriptions/keywords")
+def suggest_subscription_keywords(
+    data: SubscriptionIn,
+    user: str = Depends(current_user),
+):
+    try:
+        topic = normalize_keywords(data.topic, None)[0]
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        return {"topic": topic, "keywords": generate_keywords(topic)}
+    except Exception as exc:
+        raise HTTPException(503, "检索词生成失败；可直接使用原始主题创建订阅") from exc
+
+
 @app.get(API + "/subscriptions")
 def list_subscriptions(user: str = Depends(current_user), db: Session = Depends(get_db)):
     return {
         "items": [
-            {"id": s.id, "topic": s.topic, "active": s.active, "last_checked_at": s.last_checked_at}
-            for s in db.scalars(select(Subscription).where(Subscription.owner_id == user))
+            subscription_json(sub)
+            for sub in db.scalars(
+                select(Subscription)
+                .where(Subscription.owner_id == user, Subscription.deleted_at.is_(None))
+                .order_by(Subscription.topic)
+            )
         ]
     }
 
@@ -927,21 +969,34 @@ def list_subscriptions(user: str = Depends(current_user), db: Session = Depends(
 def subscribe(
     data: SubscriptionIn, user: str = Depends(current_user), db: Session = Depends(get_db)
 ):
-    topic = " ".join(data.topic.split())
-    if len(topic) < 2:
-        raise HTTPException(422, "Topic is too short")
+    try:
+        keywords = normalize_keywords(data.topic, data.keywords)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    topic = keywords[0]
     sub = db.scalar(
         select(Subscription).where(
-            Subscription.owner_id == user, func.lower(Subscription.topic) == topic.casefold()
+            Subscription.owner_id == user,
+            Subscription.deleted_at.is_(None),
+            func.lower(Subscription.topic) == topic.casefold(),
         )
     )
     if sub is None:
-        sub = Subscription(owner_id=user, topic=topic)
+        sub = Subscription(
+            owner_id=user,
+            topic=topic,
+            keywords=keywords,
+            active=True,
+            next_refresh_at=now(),
+            refresh_status="idle",
+        )
         db.add(sub)
-    sub.active = True
-    db.commit()
-    refresh_subscriptions.delay(sub.id)
-    return {"id": sub.id, "topic": sub.topic}
+        db.commit()
+        try:
+            enqueue_subscription_refresh(db, sub, "auto")
+        except Exception as exc:
+            raise HTTPException(503, "订阅已保存，但首次刷新任务提交失败；请稍后立即刷新") from exc
+    return subscription_json(sub)
 
 
 @app.patch(API + "/subscriptions/{subscription_id}")
@@ -952,13 +1007,19 @@ def update_subscription(
     db: Session = Depends(get_db),
 ):
     sub = db.get(Subscription, subscription_id)
-    if not sub or sub.owner_id != user:
+    if not sub or sub.owner_id != user or sub.deleted_at:
         raise HTTPException(404, "Subscription not found")
-    sub.active = data.active
+    if data.active is None and data.keywords is None:
+        raise HTTPException(422, "No changes provided")
+    if data.keywords is not None:
+        try:
+            sub.keywords = normalize_keywords(sub.topic, data.keywords)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+    if data.active is not None:
+        sub.active = data.active
     db.commit()
-    if sub.active:
-        refresh_subscriptions.delay(sub.id)
-    return {"id": sub.id, "topic": sub.topic, "active": sub.active}
+    return subscription_json(sub)
 
 
 @app.post(API + "/subscriptions/{subscription_id}/refresh")
@@ -966,12 +1027,66 @@ def refresh_subscription(
     subscription_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
 ):
     sub = db.get(Subscription, subscription_id)
-    if not sub or sub.owner_id != user:
+    if not sub or sub.owner_id != user or sub.deleted_at:
         raise HTTPException(404, "Subscription not found")
-    if not sub.active:
-        raise HTTPException(409, "Activate subscription before refreshing")
-    refresh_subscriptions.delay(sub.id)
-    return {"id": sub.id, "queued": True}
+    try:
+        queued = enqueue_subscription_refresh(db, sub, "manual")
+    except Exception as exc:
+        raise HTTPException(503, "刷新任务提交失败，请稍后重试") from exc
+    return {
+        "id": sub.id,
+        "queued": queued,
+        "refresh_status": "queued" if queued else sub.refresh_status,
+    }
+
+
+@app.get(API + "/subscriptions/{subscription_id}/refresh-status")
+def subscription_refresh_status(
+    subscription_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    sub = db.get(Subscription, subscription_id)
+    if not sub or sub.owner_id != user or sub.deleted_at:
+        raise HTTPException(404, "Subscription not found")
+    return subscription_json(sub)
+
+
+@app.delete(API + "/subscriptions/{subscription_id}")
+def delete_subscription(
+    subscription_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    sub = db.scalar(
+        select(Subscription)
+        .where(
+            Subscription.id == subscription_id,
+            Subscription.owner_id == user,
+            Subscription.deleted_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if not sub:
+        raise HTTPException(404, "Subscription not found")
+    sub.deleted_at = now()
+    sub.active = False
+    sub.refresh_status = "deleted"
+    sub.refresh_token = None
+    for rec in db.scalars(select(Recommendation).where(Recommendation.owner_id == user)):
+        if sub.topic not in (rec.topics or []):
+            continue
+        rec.topics = [topic for topic in rec.topics if topic != sub.topic]
+        matched = dict(rec.matched_keywords or {})
+        matched.pop(sub.topic, None)
+        rec.matched_keywords = matched
+        analyses = dict(rec.topic_analyses or {})
+        analyses.pop(sub.topic, None)
+        rec.topic_analyses = analyses
+        if not rec.topics and rec.status != "imported":
+            db.delete(rec)
+        elif rec.status == "pending":
+            recompute_recommendation(
+                rec, db.get(PaperCandidate, rec.candidate_id), allow_legacy=False
+            )
+    db.commit()
+    return {"deleted": True}
 
 
 @app.get(API + "/recommendations")
@@ -991,28 +1106,56 @@ def recommendations(
     ).all()
     if topic:
         items = [item for item in items if topic in item.topics]
+        items.sort(
+            key=lambda item: (
+                weighted_score(
+                    db.get(PaperCandidate, item.candidate_id),
+                    (item.topic_analyses or {}).get(topic),
+                )[0]
+                if (item.topic_analyses or {}).get(topic)
+                else -1
+            ),
+            reverse=True,
+        )
     total = len(items)
     items = items[(page - 1) * page_size : page * page_size]
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [
-            {
-                "id": x.id,
-                "candidate": candidate_json(db.get(PaperCandidate, x.candidate_id)),
-                "paper_id": x.paper_id,
-                "score": x.score,
-                "scoring_factors": x.reasons,
-                "scoring_weights": x.reasons.get("effective_weights", {}),
-                "feedback": x.feedback,
-                "topics": x.topics,
-                "summary": x.summary,
-                "reason": x.reason,
-                "status": x.status,
-            }
-            for x in items
-        ],
+        "items": [recommendation_json(db, item, topic) for item in items],
+    }
+
+
+def recommendation_json(db: Session, rec: Recommendation, topic: str | None) -> dict:
+    candidate = db.get(PaperCandidate, rec.candidate_id)
+    analysis = (rec.topic_analyses or {}).get(topic) if topic else None
+    if topic:
+        calculated, reasons = weighted_score(candidate, analysis)
+        score = calculated if analysis else None
+    else:
+        score, reasons = rec.score, rec.reasons or {}
+    return {
+        "id": rec.id,
+        "candidate": candidate_json(candidate),
+        "paper_id": rec.paper_id,
+        "score": score,
+        "scoring_factors": reasons,
+        "scoring_weights": reasons.get("effective_weights", {}),
+        "feedback": rec.feedback,
+        "topics": rec.topics,
+        "matched_keywords": rec.matched_keywords or {},
+        "summary": analysis.get("summary", "")
+        if topic and analysis
+        else rec.summary
+        if not topic
+        else "",
+        "reason": analysis.get("reason", "")
+        if topic and analysis
+        else rec.reason
+        if not topic
+        else "",
+        "status": rec.status,
     }
 
 
@@ -1035,6 +1178,10 @@ def candidate_json(candidate: PaperCandidate) -> dict:
             "github_url",
             "citation_count",
             "github_stars",
+            "project_page_url",
+            "github_source",
+            "github_verification",
+            "citation_source",
         )
     }
 

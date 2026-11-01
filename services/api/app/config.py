@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""
     rerank_model: str = ""
     github_token: str = ""
+    openalex_api_key: str = ""
+    metrics_refresh_hours: int = Field(default=24, ge=1)
+    code_retry_days: int = Field(default=7, ge=1)
+    external_error_retry_hours: int = Field(default=1, ge=1)
     mineru_command: str = "mineru-kit"
     parser_backend: Literal["local", "remote"] = "local"
     parser_vector_enhance: bool = True

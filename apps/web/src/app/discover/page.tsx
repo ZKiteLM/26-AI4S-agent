@@ -16,6 +16,9 @@ type Found = {
   citation_count: number | null;
   github_url: string | null;
   github_stars: number | null;
+  project_page_url: string | null;
+  github_verification: string | null;
+  citation_source: string | null;
 };
 type Rec = {
   id: string;
@@ -26,6 +29,7 @@ type Rec = {
   scoring_weights: Record<string, number>;
   feedback: number;
   topics: string[];
+  matched_keywords: Record<string, string[]>;
   summary: string;
   reason: string;
   status: string;
@@ -35,12 +39,120 @@ type Subscription = {
   topic: string;
   active: boolean;
   last_checked_at: string | null;
+  next_refresh_at: string | null;
+  keywords: string[];
+  refresh_status: string;
+  refresh_mode: string | null;
+  refresh_error: string | null;
 };
+type KeywordChoice = { text: string; selected: boolean };
+const runningStatuses = new Set(["queued", "searching", "scoring"]);
+const statusLabels: Record<string, string> = {
+  idle: "空闲",
+  queued: "排队中",
+  searching: "检索中",
+  scoring: "评分中",
+  completed: "已完成",
+  failed: "失败",
+};
+
+function KeywordEditor({
+  topic,
+  choices,
+  onChange,
+}: {
+  topic: string;
+  choices: KeywordChoice[];
+  onChange: (choices: KeywordChoice[]) => void;
+}) {
+  const [extra, setExtra] = useState("");
+  function addExtra() {
+    if (!extra.trim() || choices.length >= 9) return;
+    onChange([...choices, { text: extra.trim(), selected: true }]);
+    setExtra("");
+  }
+  return (
+    <div className="discover-keyword-editor">
+      <div className="discover-keyword-heading">
+        最终检索词 <span className="muted">原始主题始终保留</span>
+      </div>
+      <label className="discover-keyword-item original">
+        <input type="checkbox" checked readOnly disabled />
+        <span>{topic}</span>
+        <small>原始主题</small>
+      </label>
+      {choices.map((choice, index) => (
+        <div className="discover-keyword-item" key={index}>
+          <input
+            type="checkbox"
+            aria-label={`选择检索词 ${choice.text}`}
+            checked={choice.selected}
+            onChange={(event) =>
+              onChange(
+                choices.map((x, i) =>
+                  i === index ? { ...x, selected: event.target.checked } : x,
+                ),
+              )
+            }
+          />
+          <input
+            className="input"
+            aria-label={`编辑检索词 ${index + 1}`}
+            value={choice.text}
+            onChange={(event) =>
+              onChange(
+                choices.map((x, i) =>
+                  i === index ? { ...x, text: event.target.value } : x,
+                ),
+              )
+            }
+          />
+          <button
+            className="button ghost"
+            type="button"
+            aria-label={`删除检索词 ${choice.text}`}
+            onClick={() => onChange(choices.filter((_, i) => i !== index))}
+          >
+            删除
+          </button>
+        </div>
+      ))}
+      <div className="discover-keyword-add">
+        <input
+          className="input"
+          aria-label="手动添加检索词"
+          placeholder="补充等价检索表达"
+          value={extra}
+          onChange={(event) => setExtra(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              addExtra();
+            }
+          }}
+        />
+        <button
+          className="button secondary"
+          type="button"
+          disabled={!extra.trim() || choices.length >= 9}
+          onClick={addExtra}
+        >
+          添加检索词
+        </button>
+      </div>
+    </div>
+  );
+}
 export default function Discover() {
   const [view, setView] = useState<"search" | "tracking">("tracking"),
     [query, setQuery] = useState(""),
     [found, setFound] = useState<Found[]>([]),
     [topic, setTopic] = useState(""),
+    [choices, setChoices] = useState<KeywordChoice[]>([]),
+    [generatedFor, setGeneratedFor] = useState(""),
+    [generating, setGenerating] = useState(false),
+    [editingId, setEditingId] = useState(""),
+    [editChoices, setEditChoices] = useState<KeywordChoice[]>([]),
     [recs, setRecs] = useState<Rec[]>([]),
     [subs, setSubs] = useState<Subscription[]>([]),
     [busy, setBusy] = useState(false),
@@ -67,6 +179,15 @@ export default function Discover() {
   useEffect(() => {
     load();
   }, [load]);
+  useEffect(() => {
+    if (
+      view !== "tracking" ||
+      !subs.some((sub) => runningStatuses.has(sub.refresh_status))
+    )
+      return;
+    const timer = window.setInterval(load, 3000);
+    return () => window.clearInterval(timer);
+  }, [load, subs, view]);
   async function search() {
     setBusy(true);
     setError("");
@@ -117,16 +238,90 @@ export default function Discover() {
     }
   }
   async function subscribe() {
+    setBusyAction("subscribe");
+    setError("");
     try {
       await api("/subscriptions", {
         method: "POST",
-        body: JSON.stringify({ topic }),
+        body: JSON.stringify({
+          topic,
+          keywords: choices.filter((x) => x.selected).map((x) => x.text),
+        }),
       });
       setTopic("");
+      setChoices([]);
+      setGeneratedFor("");
       setMessage("已订阅，正在后台发现新论文。候选论文不会自动进入文献库。");
       load();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusyAction("");
+    }
+  }
+  async function suggestKeywords() {
+    setGenerating(true);
+    setError("");
+    try {
+      const result = await api<{ keywords: string[] }>(
+        "/subscriptions/keywords",
+        {
+          method: "POST",
+          body: JSON.stringify({ topic }),
+        },
+      );
+      setChoices(result.keywords.map((text) => ({ text, selected: true })));
+      setGeneratedFor(topic.trim());
+      if (!result.keywords.length)
+        setMessage("模型没有返回可用的检索词，可手动补充或直接使用原始主题。");
+    } catch (e) {
+      setError(`生成检索词失败：${String(e)}。可直接使用原始主题创建订阅。`);
+    } finally {
+      setGenerating(false);
+    }
+  }
+  function startEditing(sub: Subscription) {
+    setEditingId(sub.id);
+    setEditChoices(
+      (sub.keywords || [])
+        .filter((word) => word !== sub.topic)
+        .map((text) => ({ text, selected: true })),
+    );
+  }
+  async function saveKeywords(sub: Subscription) {
+    setBusyAction(sub.id);
+    setError("");
+    try {
+      await api(`/subscriptions/${sub.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          keywords: editChoices.filter((x) => x.selected).map((x) => x.text),
+        }),
+      });
+      setEditingId("");
+      setMessage("检索词已保存；下次刷新时生效。");
+      load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyAction("");
+    }
+  }
+  async function deleteSubscription(sub: Subscription) {
+    if (!window.confirm(`删除订阅“${sub.topic}”？未入库的专属推荐将一并移除。`))
+      return;
+    setBusyAction(sub.id);
+    setError("");
+    try {
+      await api(`/subscriptions/${sub.id}`, { method: "DELETE" });
+      if (filterTopic === sub.topic) setFilterTopic("");
+      setEditingId("");
+      setMessage("订阅已删除；已入库论文不受影响。");
+      load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyAction("");
     }
   }
   async function feedback(id: string, value: number) {
@@ -150,7 +345,7 @@ export default function Discover() {
     setBusyAction(sub.id);
     setError("");
     try {
-      await api(
+      const result = await api<{ queued?: boolean }>(
         `/subscriptions/${sub.id}${action === "refresh" ? "/refresh" : ""}`,
         {
           method: action === "refresh" ? "POST" : "PATCH",
@@ -161,10 +356,12 @@ export default function Discover() {
       );
       setMessage(
         action === "refresh"
-          ? "已排入刷新队列。"
+          ? result.queued
+            ? "已排入刷新队列。"
+            : "刷新任务已在排队或执行中。"
           : sub.active
-            ? "已暂停追踪。"
-            : "已恢复追踪，正在刷新。",
+            ? "已暂停自动追踪；仍可手动刷新。"
+            : "已恢复自动追踪。",
       );
       load();
     } catch (e) {
@@ -274,7 +471,7 @@ export default function Discover() {
           aria-labelledby="discover-tab-tracking"
         >
           <form
-            className="panel discover-action-bar"
+            className="panel discover-action-bar discover-tracking-form"
             onSubmit={(event) => {
               event.preventDefault();
               void subscribe();
@@ -285,18 +482,42 @@ export default function Discover() {
               <input
                 className="input"
                 value={topic}
-                onChange={(e) => setTopic(e.target.value)}
+                onChange={(e) => {
+                  setTopic(e.target.value);
+                  setChoices([]);
+                  setGeneratedFor("");
+                }}
                 aria-label="研究主题"
                 placeholder="例如 large language model agents"
               />
               <button
+                className="button secondary"
+                type="button"
+                disabled={topic.trim().length < 2 || generating || !!busyAction}
+                onClick={() => void suggestKeywords()}
+              >
+                {generating ? "生成中…" : "生成检索词"}
+              </button>
+              <button
                 className="button"
                 type="submit"
-                disabled={topic.length < 2}
+                disabled={topic.trim().length < 2 || generating || !!busyAction}
               >
-                添加订阅
+                创建订阅
               </button>
             </div>
+            {topic.trim() && (
+              <KeywordEditor
+                topic={topic.trim()}
+                choices={choices}
+                onChange={setChoices}
+              />
+            )}
+            {generatedFor && (
+              <p className="muted discover-keyword-note">
+                已生成候选检索词，请检查是否符合你的研究主题，可取消、修改或补充。
+              </p>
+            )}
           </form>
           <div className="panel discover-subscriptions-panel">
             <div className="discover-section-caption">
@@ -307,19 +528,96 @@ export default function Discover() {
               {subs.length === 0 && <p className="muted">暂无订阅</p>}
               {subs.map((sub) => (
                 <div className="discover-subscription" key={sub.id}>
-                  <div>
+                  <div className="discover-subscription-main">
                     <strong>{sub.topic}</strong>
                     <span className="muted">
-                      {sub.active ? "追踪中" : "已暂停"} ·{" "}
+                      {sub.active ? "自动追踪中" : "自动追踪已暂停"} ·{" "}
                       {sub.last_checked_at
-                        ? `上次刷新 ${new Date(sub.last_checked_at).toLocaleString("zh-CN")}`
+                        ? `上次成功刷新 ${new Date(sub.last_checked_at).toLocaleString("zh-CN")}`
                         : "等待首次刷新"}
                     </span>
+                    {sub.active && sub.next_refresh_at && (
+                      <span className="muted">
+                        {sub.last_checked_at &&
+                        new Date(sub.next_refresh_at).getTime() -
+                          new Date(sub.last_checked_at).getTime() <
+                          6 * 24 * 60 * 60 * 1000
+                          ? "下次来源补全重试 "
+                          : "下次预计自动刷新 "}
+                        {new Date(sub.next_refresh_at).toLocaleString("zh-CN")}
+                      </span>
+                    )}
+                    <div
+                      className="discover-keyword-chips"
+                      aria-label="已选检索词"
+                    >
+                      {(sub.keywords || [sub.topic]).map((word) => (
+                        <span key={word}>{word}</span>
+                      ))}
+                    </div>
+                    <span
+                      className={`discover-task-status ${sub.refresh_status === "failed" ? "failed" : ""}`}
+                      role="status"
+                    >
+                      当前任务：
+                      {statusLabels[sub.refresh_status] || sub.refresh_status}
+                    </span>
+                    {sub.refresh_error && (
+                      <span className="error" role="alert">
+                        {sub.refresh_error}
+                      </span>
+                    )}
+                    {editingId === sub.id && (
+                      <div className="discover-subscription-edit">
+                        <KeywordEditor
+                          topic={sub.topic}
+                          choices={editChoices}
+                          onChange={setEditChoices}
+                        />
+                        <div className="row">
+                          <button
+                            className="button"
+                            type="button"
+                            disabled={!!busyAction}
+                            onClick={() => void saveKeywords(sub)}
+                          >
+                            保存检索词
+                          </button>
+                          <button
+                            className="button ghost"
+                            type="button"
+                            onClick={() => setEditingId("")}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <div className="row">
+                  <div className="row discover-subscription-actions">
                     <button
                       className="button ghost"
-                      disabled={!!busyAction || !sub.active}
+                      type="button"
+                      disabled={!!busyAction}
+                      onClick={() =>
+                        editingId === sub.id
+                          ? setEditingId("")
+                          : startEditing(sub)
+                      }
+                    >
+                      编辑关键词
+                    </button>
+                    <button
+                      className="button ghost"
+                      disabled={
+                        !!busyAction ||
+                        (runningStatuses.has(sub.refresh_status) &&
+                          !(
+                            sub.refresh_status === "queued" &&
+                            sub.refresh_mode === "auto" &&
+                            !sub.active
+                          ))
+                      }
                       onClick={() => manageSubscription(sub, "refresh")}
                     >
                       立即刷新
@@ -329,7 +627,15 @@ export default function Discover() {
                       disabled={!!busyAction}
                       onClick={() => manageSubscription(sub, "toggle")}
                     >
-                      {sub.active ? "暂停" : "恢复"}
+                      {sub.active ? "暂停自动追踪" : "恢复自动追踪"}
+                    </button>
+                    <button
+                      className="button ghost"
+                      type="button"
+                      disabled={!!busyAction}
+                      onClick={() => void deleteSubscription(sub)}
+                    >
+                      删除订阅
                     </button>
                   </div>
                 </div>
@@ -405,6 +711,14 @@ export default function Discover() {
                       {x.candidate.source} · {x.candidate.year || "年份未知"} ·{" "}
                       {x.topics.join(" / ")}
                     </div>
+                    {Object.entries(x.matched_keywords || {}).length > 0 && (
+                      <p className="muted discover-match-keywords">
+                        命中检索词：
+                        {[
+                          ...new Set(Object.values(x.matched_keywords).flat()),
+                        ].join("、")}
+                      </p>
+                    )}
                     <h2>{x.candidate.title}</h2>
                     <p className="muted">
                       {x.candidate.authors.slice(0, 6).join("、")}
@@ -452,7 +766,12 @@ export default function Discover() {
                 </details>
                 <div className="row discover-metrics">
                   <span>引用 {x.candidate.citation_count ?? "未知"}</span>
-                  <span>GitHub Stars {x.candidate.github_stars ?? "未知"}</span>
+                  <span>
+                    官方 GitHub Stars{" "}
+                    {x.candidate.github_verification === "verified"
+                      ? (x.candidate.github_stars ?? "未知")
+                      : "未知"}
+                  </span>
                   {x.candidate.source_url && (
                     <a
                       href={x.candidate.source_url}
@@ -462,15 +781,25 @@ export default function Discover() {
                       原文 ↗
                     </a>
                   )}
-                  {x.candidate.github_url && (
+                  {x.candidate.project_page_url && (
                     <a
-                      href={x.candidate.github_url}
+                      href={x.candidate.project_page_url}
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      代码 ↗
+                      项目主页 ↗
                     </a>
                   )}
+                  {x.candidate.github_url &&
+                    x.candidate.github_verification === "verified" && (
+                      <a
+                        href={x.candidate.github_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        官方代码 ↗
+                      </a>
+                    )}
                 </div>
                 <div className="row">
                   {x.status === "pending" && (

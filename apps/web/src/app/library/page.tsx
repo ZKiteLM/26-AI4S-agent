@@ -1,7 +1,13 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, FileText, Search, UploadCloud } from "lucide-react";
+import {
+  ArrowUpRight,
+  FileText,
+  Search,
+  Trash2,
+  UploadCloud,
+} from "lucide-react";
 import { api, Paper } from "@/lib/api";
 
 type Conflict = {
@@ -16,7 +22,9 @@ export default function Library() {
   const [papers, setPapers] = useState<Paper[]>([]),
     [query, setQuery] = useState(""),
     [busy, setBusy] = useState(false),
+    [deletingId, setDeletingId] = useState<string | null>(null),
     [error, setError] = useState(""),
+    [notice, setNotice] = useState(""),
     [conflicts, setConflicts] = useState<Conflict[]>([]);
   const load = useCallback(
     (search = "") =>
@@ -59,6 +67,27 @@ export default function Library() {
       setError(String(e));
     }
   }
+  async function removePaper(paper: Paper) {
+    if (
+      !window.confirm(
+        `确定删除《${paper.title}》吗？\n该论文的所有版本、PDF、解析内容及向量索引将一并删除。`,
+      )
+    )
+      return;
+    setDeletingId(paper.id);
+    setError("");
+    setNotice("");
+    try {
+      await api(`/papers/${paper.id}`, { method: "DELETE" });
+      setPapers((current) => current.filter((item) => item.id !== paper.id));
+      setNotice(`已删除《${paper.title}》。`);
+      await load(query);
+    } catch (cause) {
+      setError(`删除失败：${String(cause)}`);
+    } finally {
+      setDeletingId(null);
+    }
+  }
   return (
     <>
       <div className="workspace-hero compact-actions">
@@ -85,6 +114,11 @@ export default function Library() {
         />
       </div>
       {error && <p className="error">{error}</p>}
+      {notice && (
+        <p className="success" role="status">
+          {notice}
+        </p>
+      )}
       {conflicts.map((c) => (
         <div className="panel" key={c.id}>
           <h3>发现同一论文的不同版本</h3>
@@ -130,23 +164,37 @@ export default function Library() {
       </div>
       <div className="grid">
         {papers.map((p) => (
-          <Link href={`/papers/${p.id}`} className="card paper-card" key={p.id}>
-            <FileText size={21} color="#6e86b5" aria-hidden="true" />
-            <div className="section-label">
-              {p.source} · {p.year || "年份未识别"}
-            </div>
-            <h2>{p.title}</h2>
+          <article className="card paper-card" key={p.id}>
+            <Link href={`/papers/${p.id}`} className="paper-card-main">
+              <div className="paper-card-top">
+                <FileText size={21} color="#6e86b5" aria-hidden="true" />
+                <ArrowUpRight
+                  className="card-arrow"
+                  size={18}
+                  aria-hidden="true"
+                />
+              </div>
+              <div className="section-label">
+                {p.source} · {p.year || "年份未识别"}
+              </div>
+              <h2>{p.title}</h2>
+            </Link>
             <div className="card-bottom">
               <span className="badge">
                 {p.arxiv_id ? `arXiv ${p.arxiv_id}` : "本地论文"}
               </span>
-              <ArrowUpRight
-                className="card-arrow"
-                size={18}
-                aria-hidden="true"
-              />
+              <button
+                className="button ghost paper-delete-button"
+                type="button"
+                onClick={() => void removePaper(p)}
+                disabled={deletingId !== null}
+                aria-label={`删除文献：${p.title}`}
+              >
+                <Trash2 size={16} aria-hidden="true" />
+                {deletingId === p.id ? "删除中…" : "删除"}
+              </button>
             </div>
-          </Link>
+          </article>
         ))}
       </div>
       {!papers.length && (

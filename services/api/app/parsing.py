@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 
 def identify_pdf(data: bytes, filename: str) -> dict:
     doc = pymupdf.open(stream=data, filetype="pdf")
-    sample = " ".join(doc[i].get_text() for i in range(min(len(doc), 5)))
+    sample = "\n".join(doc[i].get_text() for i in range(min(len(doc), 5)))
     title = (doc.metadata or {}).get("title") or ""
     first_lines = [x.strip() for x in sample.splitlines() if x.strip()]
     if not title or title.lower() in {"untitled", "microsoft word"}:
-        title = first_lines[0] if first_lines else Path(filename).stem
+        title = _first_page_title(doc[0]) or (first_lines[0] if first_lines else Path(filename).stem)
     match = ARXIV_RE.search(filename) or ARXIV_RE.search(sample[:2000])
     normalized = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", sample.lower())).strip()
     shingles = {normalized[i : i + 60] for i in range(0, max(len(normalized) - 59, 0), 30)}
@@ -40,6 +40,24 @@ def identify_pdf(data: bytes, filename: str) -> dict:
         "sample_text": normalized[:12000],
         "shingles": shingles,
     }
+
+
+def _first_page_title(page: pymupdf.Page) -> str | None:
+    candidates = []
+    for block in page.get_text("dict", sort=True)["blocks"]:
+        if "lines" not in block or block["bbox"][1] > page.rect.height * 0.6:
+            continue
+        spans = [span for line in block["lines"] for span in line["spans"]]
+        text = " ".join(span["text"].strip() for span in spans if span["text"].strip())
+        if (
+            not 8 <= len(text) <= 180
+            or re.search(r"arxiv|copyright|permission|attribution|license|@|^abstract$", text, re.I)
+        ):
+            continue
+        size = max(span["size"] for span in spans)
+        if size >= 14:
+            candidates.append((size, -block["bbox"][1], text))
+    return max(candidates)[2] if candidates else None
 
 
 def similarity(a: str, b: str) -> float:

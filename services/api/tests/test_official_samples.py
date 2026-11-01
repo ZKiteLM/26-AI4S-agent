@@ -1,17 +1,8 @@
 import json
-import os
-import tempfile
 import zipfile
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-
-db_fd, db_path = tempfile.mkstemp(suffix=".sqlite3")
-os.close(db_fd)
-os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
-os.environ["S3_ENDPOINT"] = ""
-os.environ["LOCAL_STORAGE"] = tempfile.mkdtemp()
-os.environ["PARSER_VECTOR_ENHANCE"] = "0"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -275,8 +266,12 @@ def test_subscription_retries_partial_source_and_unscored_candidate(monkeypatch)
 
 
 def test_subscription_can_pause_resume_and_refresh(monkeypatch):
+    from services.api.app.models import Subscription
+
     queued = []
-    monkeypatch.setattr("services.api.app.main.refresh_subscriptions.delay", queued.append)
+    monkeypatch.setattr(
+        "services.api.app.worker.refresh_subscriptions.delay", lambda *args: queued.append(args)
+    )
     with TestClient(app) as client:
         login = client.post(
             "/api/v1/auth/login", json={"email": "demo@example.com", "password": "change-me"}
@@ -295,18 +290,28 @@ def test_subscription_can_pause_resume_and_refresh(monkeypatch):
             f"/api/v1/subscriptions/{sub_id}", json={"active": False}, headers=headers
         )
         assert paused.json()["active"] is False
+        # Pausing a queued automatic task permits a manual refresh to replace it.
+        repeated = client.post(f"/api/v1/subscriptions/{sub_id}/refresh", headers=headers)
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json()["queued"] is True
         assert (
-            client.post(f"/api/v1/subscriptions/{sub_id}/refresh", headers=headers).status_code
-            == 409
+            client.post(f"/api/v1/subscriptions/{sub_id}/refresh", headers=headers).json()["queued"]
+            is False
+        )
+        with SessionLocal() as db:
+            sub = db.get(Subscription, sub_id)
+            sub.refresh_status = "completed"
+            db.commit()
+        assert (
+            client.post(f"/api/v1/subscriptions/{sub_id}/refresh", headers=headers).json()["queued"]
+            is True
         )
         resumed = client.patch(
             f"/api/v1/subscriptions/{sub_id}", json={"active": True}, headers=headers
         )
         assert resumed.json()["active"] is True
-        assert client.post(f"/api/v1/subscriptions/{sub_id}/refresh", headers=headers).json()[
-            "queued"
-        ]
-        assert queued == [sub_id, sub_id, sub_id, sub_id]
+        assert len(queued) == 3
+        assert all(args[0] == sub_id for args in queued)
 
 
 ROOT = Path(__file__).resolve().parents[3]

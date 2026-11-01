@@ -365,6 +365,51 @@ h3 {
   flex: none;
   min-width: 96px;
 }
+.discover-tracking-form {
+  flex-wrap: wrap;
+}
+.discover-keyword-editor {
+  display: grid;
+  gap: 9px;
+  width: 100%;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.discover-keyword-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+}
+.discover-keyword-item,
+.discover-keyword-add {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.discover-keyword-item input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  accent-color: var(--brand);
+}
+.discover-keyword-item .input,
+.discover-keyword-add .input {
+  flex: 1;
+  min-width: 0;
+}
+.discover-keyword-item.original {
+  color: var(--brand);
+  font-weight: 650;
+}
+.discover-keyword-item small {
+  color: var(--muted);
+}
+.discover-keyword-note {
+  width: 100%;
+  margin: 0;
+}
 .discover-search-results {
   margin-top: 16px;
 }
@@ -494,6 +539,50 @@ h3 {
   border: 1px solid var(--line);
   border-radius: 8px;
 }
+.discover-subscription-main {
+  flex: 1;
+  min-width: 0;
+}
+.discover-subscription-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.discover-subscription-actions .button {
+  min-height: 44px;
+}
+.discover-keyword-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+.discover-keyword-chips span,
+.discover-task-status {
+  display: inline-flex;
+  border-radius: 99px;
+  background: var(--soft);
+  color: var(--brand);
+  padding: 3px 9px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.discover-task-status {
+  margin-top: 8px;
+}
+.discover-task-status.failed {
+  background: #fff0ed;
+  color: #a33225;
+}
+.discover-subscription-edit {
+  margin-top: 12px;
+}
+.discover-subscription-edit .row {
+  margin-top: 10px;
+}
+.discover-match-keywords {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
 .discover-subscription strong,
 .discover-subscription .muted {
   display: block;
@@ -575,6 +664,19 @@ h3 {
   .discover-subscription {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .discover-action-controls,
+  .discover-keyword-add {
+    flex-wrap: wrap;
+  }
+  .discover-tracking-form .discover-action-controls .input {
+    flex-basis: 100%;
+  }
+  .discover-tracking-form .discover-action-controls .button {
+    flex: 1;
+  }
+  .discover-subscription-actions {
+    justify-content: flex-start;
   }
   .discover-score {
     text-align: left;
@@ -781,6 +883,18 @@ h3 {
   display: flex;
   flex-direction: column;
 }
+.paper-card-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  color: inherit;
+  text-decoration: none;
+}
+.paper-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
 .paper-card h2 {
   font-size: 17px;
   line-height: 1.45;
@@ -791,7 +905,11 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 22px;
+  margin-top: 16px;
+}
+.button.ghost.paper-delete-button {
+  min-height: 44px;
+  color: var(--danger);
 }
 .paper-card .card-arrow {
   font-size: 18px;

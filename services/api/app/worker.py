@@ -5,10 +5,11 @@ import re
 import time
 from collections import defaultdict, deque
 from datetime import timedelta
+from uuid import uuid4
 
 from celery import Celery
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select, update
 from typing_extensions import TypedDict
 
 from .ai import generate
@@ -34,9 +35,17 @@ from .models import (
 )
 from .observability import record
 from .parsing import parse_pdf
-from .recommender import enrich_candidate, score_analyses, upsert_candidate, upsert_recommendation
+from .recommender import (
+    enrich_candidate,
+    enrichment_due,
+    refresh_candidate_scores,
+    score_analyses,
+    upsert_candidate,
+    upsert_recommendation,
+)
 from .retrieval import first_page_evidence, index_chunks, make_chunks, remove_version_index, search
 from .storage import Storage
+from .subscription_keywords import normalize_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +53,14 @@ celery_app = Celery("research", broker=settings().redis_url, backend=settings().
 celery_app.conf.task_default_queue = "default"
 celery_app.conf.task_always_eager = os.getenv("CELERY_TASK_ALWAYS_EAGER") == "1"
 celery_app.conf.beat_schedule = {
-    "refresh-subscriptions-daily": {"task": "research.refresh_subscriptions", "schedule": 86400.0}
+    "schedule-due-subscriptions": {
+        "task": "research.schedule_due_subscriptions",
+        "schedule": 900.0,
+    },
+    "refresh-candidate-metrics-daily": {
+        "task": "research.refresh_candidate_metrics",
+        "schedule": 86400.0,
+    },
 }
 
 
@@ -65,6 +81,9 @@ def parse_version(task_id: str, version_id: str) -> None:
     with SessionLocal() as db:
         task = db.get(BackgroundTask, task_id)
         version = db.get(Version, version_id)
+        if not task or not version:
+            logger.warning("Skipped obsolete parse task %s for version %s", task_id, version_id)
+            return
         had_blocks = (
             db.scalar(select(Block.id).where(Block.version_id == version_id).limit(1)) is not None
         )
@@ -512,48 +531,181 @@ def run_agent(run_id: str) -> None:
             record("worker", "ERROR", "科研任务失败", run_id=run_id, error=run.error)
 
 
-@celery_app.task(name="research.refresh_subscriptions")
-def refresh_subscriptions(subscription_id: str | None = None) -> None:
-    record("worker", "INFO", "开始更新论文订阅")
-    with SessionLocal() as db:
-        statement = select(Subscription).where(Subscription.active.is_(True))
-        if subscription_id:
-            statement = statement.where(Subscription.id == subscription_id)
-        for sub in db.scalars(statement).all():
-            cutoff = max(
-                (sub.last_checked_at.date() if sub.last_checked_at else now().date())
-                - timedelta(days=1 if sub.last_checked_at else 30),
-                now().date() - timedelta(days=30),
+ACTIVE_REFRESH = ("queued", "searching", "scoring")
+
+
+def enqueue_subscription_refresh(db, sub: Subscription, mode: str) -> bool:
+    """Atomically reserve one refresh slot before publishing a Celery task."""
+    current = now()
+    token = str(uuid4())
+    available = [
+        Subscription.refresh_status.notin_(ACTIVE_REFRESH),
+        Subscription.refresh_requested_at < current - timedelta(hours=2),
+    ]
+    if mode == "manual":
+        available.append(
+            and_(
+                Subscription.refresh_status == "queued",
+                Subscription.refresh_mode == "auto",
+                Subscription.active.is_(False),
             )
-            works = []
-            openalex_ok = arxiv_ok = False
+        )
+    where = [
+        Subscription.id == sub.id,
+        Subscription.deleted_at.is_(None),
+        or_(*available),
+    ]
+    if mode == "auto":
+        where.extend((Subscription.active.is_(True), Subscription.next_refresh_at <= current))
+    changed = db.execute(
+        update(Subscription)
+        .where(*where)
+        .values(
+            refresh_status="queued",
+            refresh_token=token,
+            refresh_mode=mode,
+            refresh_requested_at=current,
+            refresh_error=None,
+        )
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    db.commit()
+    db.refresh(sub)
+    if not changed:
+        return False
+    try:
+        refresh_subscriptions.delay(sub.id, token)
+    except Exception as exc:
+        db.execute(
+            update(Subscription)
+            .where(Subscription.id == sub.id, Subscription.refresh_token == token)
+            .values(
+                refresh_status="failed",
+                refresh_error=f"任务提交失败：{exc}"[:500],
+                next_refresh_at=current + timedelta(hours=1)
+                if mode == "auto"
+                else sub.next_refresh_at,
+            )
+        )
+        db.commit()
+        raise
+    return True
+
+
+@celery_app.task(name="research.schedule_due_subscriptions")
+def schedule_due_subscriptions() -> None:
+    with SessionLocal() as db:
+        due = db.scalars(
+            select(Subscription)
+            .where(
+                Subscription.active.is_(True),
+                Subscription.deleted_at.is_(None),
+                Subscription.next_refresh_at <= now(),
+            )
+            .order_by(Subscription.next_refresh_at)
+            .limit(100)
+        ).all()
+        for sub in due:
             try:
-                works.extend(search_external(sub.topic, 25, cutoff))
-                openalex_ok = True
+                enqueue_subscription_refresh(db, sub, "auto")
             except Exception:
-                logger.exception("OpenAlex subscription refresh failed for %s", sub.id)
+                logger.exception("Failed to queue subscription %s", sub.id)
+
+
+def _discovered_works(sub: Subscription) -> tuple[list[tuple[dict, list[str]]], list[str]]:
+    keywords = normalize_keywords(sub.topic, sub.keywords or [sub.topic])[:10]
+    cutoff = (
+        max(sub.last_checked_at.date() - timedelta(days=2), now().date() - timedelta(days=90))
+        if sub.last_checked_at
+        else now().date() - timedelta(days=30)
+    )
+    buckets: list[tuple[str, list[dict]]] = []
+    errors = []
+    for keyword in keywords:
+        for source, search_fn in (("OpenAlex", search_external), ("arXiv", search_arxiv)):
             try:
-                works.extend(search_arxiv(sub.topic, 25, cutoff))
-                arxiv_ok = True
-            except Exception:
-                logger.exception("arXiv subscription refresh failed for %s", sub.id)
-            seen = set()
-            candidates = []
-            for work in works[:30]:
-                if not work.get("title") or not work.get("abstract"):
+                buckets.append((keyword, search_fn(keyword, 8, cutoff)))
+            except Exception as exc:
+                logger.exception("%s search failed for subscription %s", source, sub.id)
+                errors.append(f"{source} / {keyword}: {type(exc).__name__}")
+    chosen: dict[str, tuple[dict, list[str]]] = {}
+    for rank in range(8):
+        for keyword, works in buckets:
+            if rank >= len(works):
+                continue
+            work = works[rank]
+            if not work.get("title") or not work.get("abstract"):
+                continue
+            # Title is stable across arXiv/OpenAlex even when one source lacks identifiers.
+            key = re.sub(r"\W+", "", work["title"].casefold())
+            if not key:
+                continue
+            if key not in chosen:
+                if len(chosen) >= 40:
                     continue
+                chosen[key] = (work, [keyword])
+            else:
+                previous, matched = chosen[key]
+                if keyword not in matched:
+                    matched.append(keyword)
+                if work.get("source") == "OpenAlex" and previous.get("source") != "OpenAlex":
+                    chosen[key] = (work, matched)
+    return list(chosen.values()), errors
+
+
+@celery_app.task(name="research.refresh_subscriptions")
+def refresh_subscriptions(subscription_id: str | None = None, token: str | None = None) -> None:
+    if subscription_id is None:
+        schedule_due_subscriptions.run()
+        return
+    with SessionLocal() as db:
+        sub = db.get(Subscription, subscription_id)
+        if not sub or sub.deleted_at or (token and sub.refresh_token != token):
+            return
+        if token and sub.refresh_mode == "auto" and not sub.active:
+            sub.refresh_status = "idle"
+            db.commit()
+            return
+        mode = sub.refresh_mode if token else "auto"
+        sub.refresh_status = "searching"
+        db.commit()
+        try:
+            discovered, source_errors = _discovered_works(sub)
+            errors = []
+            # Lock this subscription while writing recommendations. A concurrent delete
+            # waits and then removes this topic's recommendations in the same order.
+            sub = db.scalar(
+                select(Subscription).where(Subscription.id == subscription_id).with_for_update()
+            )
+            if not sub or sub.deleted_at or (token and sub.refresh_token != token):
+                db.rollback()
+                return
+            sub.refresh_status = "scoring"
+            db.commit()
+            sub = db.scalar(
+                select(Subscription).where(Subscription.id == subscription_id).with_for_update()
+            )
+            if not sub or sub.deleted_at or (token and sub.refresh_token != token):
+                db.rollback()
+                return
+            candidates, matches, seen = [], {}, set()
+            for work, keywords in discovered:
                 try:
                     with db.begin_nested():
                         candidate = upsert_candidate(db, work)
+                        matches.setdefault(candidate.id, [])
+                        matches[candidate.id] = list(
+                            dict.fromkeys([*matches[candidate.id], *keywords])
+                        )
                         if candidate.id not in seen:
-                            enrich_candidate(candidate)
+                            if enrich_candidate(candidate):
+                                refresh_candidate_scores(db, candidate)
                             db.flush()
                             seen.add(candidate.id)
                             candidates.append(candidate)
                 except Exception:
                     logger.exception("Candidate refresh failed for %s", work.get("title"))
-            # Retry unfinished analyses and missing external metrics even after a paper
-            # has fallen outside the incremental publication window.
+                    errors.append(f"候选论文处理失败：{work.get('title', '')[:80]}")
             pending = db.scalars(
                 select(Recommendation).where(
                     Recommendation.owner_id == sub.owner_id,
@@ -567,14 +719,13 @@ def refresh_subscriptions(subscription_id: str | None = None) -> None:
                     continue
                 candidate = db.get(PaperCandidate, rec.candidate_id)
                 if not candidate or (
-                    rec.relevance_score is not None
-                    and candidate.citation_count is not None
-                    and (not candidate.github_url or candidate.github_stars is not None)
+                    sub.topic in (rec.topic_analyses or {}) and not enrichment_due(candidate)
                 ):
                     continue
                 try:
                     with db.begin_nested():
-                        enrich_candidate(candidate)
+                        if enrich_candidate(candidate):
+                            refresh_candidate_scores(db, candidate)
                         db.flush()
                         seen.add(candidate.id)
                         candidates.append(candidate)
@@ -590,21 +741,85 @@ def refresh_subscriptions(subscription_id: str | None = None) -> None:
                 )
                 if not existing or (
                     existing.status == "pending"
-                    and (existing.relevance_score is None or sub.topic not in existing.topics)
+                    and sub.topic not in (existing.topic_analyses or {})
                 ):
                     needs_analysis.append(candidate)
             analyses = {}
             for index in range(0, len(needs_analysis), 4):
                 analyses.update(score_analyses(sub.topic, needs_analysis[index : index + 4]))
+            if len(analyses) < len(needs_analysis):
+                errors.append("部分论文的 LLM 相关性评分失败")
             for candidate in candidates:
                 try:
                     with db.begin_nested():
                         upsert_recommendation(
-                            db, sub.owner_id, sub.topic, candidate, analyses.get(candidate.id)
+                            db,
+                            sub.owner_id,
+                            sub.topic,
+                            candidate,
+                            analyses.get(candidate.id),
+                            matches.get(candidate.id),
                         )
                         db.flush()
                 except Exception:
                     logger.exception("Recommendation scoring failed for %s", candidate.id)
-            if openalex_ok and arxiv_ok:
+                    errors.append(f"推荐记录保存失败：{candidate.id}")
+            if errors or (source_errors and not discovered):
+                sub.refresh_status = "failed"
+                sub.refresh_error = "；".join((errors or source_errors)[:4])[:500]
+                if mode == "auto":
+                    sub.next_refresh_at = now() + timedelta(hours=1)
+            else:
+                sub.refresh_status = "completed"
+                sub.refresh_error = None
                 sub.last_checked_at = now()
+                if source_errors:
+                    logger.warning(
+                        "Subscription %s completed with unavailable sources: %s",
+                        subscription_id,
+                        "; ".join(source_errors),
+                    )
+                if mode == "auto":
+                    sub.last_auto_refreshed_at = sub.last_checked_at
+                    sub.next_refresh_at = sub.last_checked_at + timedelta(
+                        hours=1 if source_errors else 24 * 7
+                    )
+                elif sub.active and (
+                    sub.last_auto_refreshed_at is None
+                    or sub.next_refresh_at is not None
+                    and sub.next_refresh_at <= sub.last_checked_at + timedelta(hours=1)
+                ):
+                    # A successful manual run supersedes a failed automatic run's retry.
+                    sub.next_refresh_at = sub.last_checked_at + timedelta(days=7)
             db.commit()
+        except Exception as exc:
+            logger.exception("Subscription refresh failed for %s", subscription_id)
+            db.rollback()
+            sub = db.get(Subscription, subscription_id)
+            if sub and not sub.deleted_at and (not token or sub.refresh_token == token):
+                sub.refresh_status = "failed"
+                sub.refresh_error = str(exc)[:500]
+                if mode == "auto":
+                    sub.next_refresh_at = now() + timedelta(hours=1)
+                db.commit()
+
+
+@celery_app.task(name="research.refresh_candidate_metrics")
+def refresh_candidate_metrics() -> None:
+    """Refresh cached evidence for older recommendations without rerunning the LLM."""
+    with SessionLocal() as db:
+        candidates = db.scalars(select(PaperCandidate).order_by(PaperCandidate.updated_at)).all()
+        refreshed = 0
+        for candidate in candidates:
+            if not enrichment_due(candidate):
+                continue
+            try:
+                with db.begin_nested():
+                    if enrich_candidate(candidate):
+                        refresh_candidate_scores(db, candidate)
+                db.commit()
+                refreshed += 1
+                if refreshed >= 500:
+                    break
+            except Exception:
+                logger.exception("Candidate metric refresh failed for %s", candidate.id)
