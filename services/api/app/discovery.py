@@ -1,15 +1,19 @@
 import re
 import xml.etree.ElementTree as ET
+from datetime import date
 
 import httpx
 
 from .config import settings
 
 
-def search_external(query: str, limit: int = 10) -> list[dict]:
+def search_external(query: str, limit: int = 10, from_date: date | None = None) -> list[dict]:
+    params = {"search": query, "per-page": min(limit, 25), "sort": "publication_date:desc"}
+    if from_date:
+        params["filter"] = f"from_publication_date:{from_date.isoformat()}"
     response = httpx.get(
         "https://api.openalex.org/works",
-        params={"search": query, "per-page": min(limit, 25)},
+        params=params,
         timeout=20,
     )
     response.raise_for_status()
@@ -22,6 +26,8 @@ def search_external(query: str, limit: int = 10) -> list[dict]:
                 "title": work.get("display_name", ""),
                 "authors": [x["author"]["display_name"] for x in work.get("authorships", [])[:12]],
                 "year": work.get("publication_year"),
+                "published_at": work.get("publication_date"),
+                "citation_count": work.get("cited_by_count"),
                 "doi": work.get("doi"),
                 "openalex_id": work.get("id"),
                 "arxiv_id": _arxiv_id(ids.get("arxiv") or locations.get("landing_page_url") or ""),
@@ -35,7 +41,7 @@ def search_external(query: str, limit: int = 10) -> list[dict]:
     return results
 
 
-def search_arxiv(query: str, limit: int = 10) -> list[dict]:
+def search_arxiv(query: str, limit: int = 10, from_date: date | None = None) -> list[dict]:
     identifier = _arxiv_id(query)
     params = {"max_results": min(limit, 25), "sortBy": "submittedDate", "sortOrder": "descending"}
     if identifier and query.strip() == identifier:
@@ -53,6 +59,9 @@ def search_arxiv(query: str, limit: int = 10) -> list[dict]:
         if not arxiv_id:
             continue
         published = entry.findtext(f"{atom}published") or ""
+        if from_date and published[:10] < from_date.isoformat():
+            continue
+        doi = entry.findtext("{http://arxiv.org/schemas/atom}doi")
         papers.append(
             {
                 "title": " ".join((entry.findtext(f"{atom}title") or "").split()),
@@ -60,7 +69,9 @@ def search_arxiv(query: str, limit: int = 10) -> list[dict]:
                     x.findtext(f"{atom}name") or "" for x in entry.findall(f"{atom}author")
                 ],
                 "year": int(published[:4]) if published[:4].isdigit() else None,
-                "doi": None,
+                "doi": doi,
+                "published_at": published[:10] or None,
+                "citation_count": None,
                 "openalex_id": None,
                 "arxiv_id": arxiv_id,
                 "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
@@ -71,6 +82,36 @@ def search_arxiv(query: str, limit: int = 10) -> list[dict]:
             }
         )
     return papers
+
+
+def openalex_metrics(doi: str | None, arxiv_id: str | None, openalex_id: str | None = None) -> dict:
+    """Find an OpenAlex match for arXiv metadata without inventing a citation count."""
+    if not doi and not arxiv_id and not openalex_id:
+        return {}
+    try:
+        if openalex_id and re.fullmatch(r"https://openalex\.org/W\d+", openalex_id):
+            response = httpx.get(
+                "https://api.openalex.org/works/" + openalex_id.rsplit("/", 1)[-1],
+                timeout=15,
+            )
+            response.raise_for_status()
+            work = response.json()
+            return {"openalex_id": work.get("id"), "citation_count": work.get("cited_by_count")}
+        params = {"filter": f"doi:{doi}"} if doi else {"search": f"arxiv {arxiv_id}"}
+        response = httpx.get(
+            "https://api.openalex.org/works", params={**params, "per-page": 5}, timeout=15
+        )
+        response.raise_for_status()
+        for work in response.json().get("results", []):
+            ids = work.get("ids") or {}
+            matched = (doi and (work.get("doi") or "").lower() == doi.lower()) or (
+                arxiv_id and arxiv_id in str(ids.get("arxiv") or "")
+            )
+            if matched:
+                return {"openalex_id": work.get("id"), "citation_count": work.get("cited_by_count")}
+    except httpx.HTTPError:
+        pass
+    return {}
 
 
 def _arxiv_id(value: str) -> str | None:
@@ -112,7 +153,7 @@ def inspect_github(text: str) -> dict:
     match = re.search(r"https?://github\.com/([\w.-]+)/([\w.-]+)", text)
     if not match:
         return {"repository": None, "verified": False}
-    owner, repo = match.group(1), match.group(2).removesuffix(".git")
+    owner, repo = match.group(1), match.group(2).rstrip(".,;:)]}").removesuffix(".git")
     headers = (
         {"Authorization": f"Bearer {settings().github_token}"} if settings().github_token else {}
     )

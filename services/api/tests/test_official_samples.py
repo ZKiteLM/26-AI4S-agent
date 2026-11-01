@@ -28,7 +28,7 @@ from services.api.app.chat_agent import (
     number_citations,
     run_react,
 )
-from services.api.app.db import Base, SessionLocal
+from services.api.app.db import Base, SessionLocal, engine
 from services.api.app.graphs import build_graph
 from services.api.app.main import app
 from services.api.app.models import AgentRun, BackgroundTask, Block, Paper, Translation, Version
@@ -42,6 +42,272 @@ from services.api.app.parsing import (
 from services.api.app.retrieval import make_chunks, paper_outline, read_paper_fragment, search
 from services.api.app.translation import protect_math, restore_math, translate_text
 from services.api.app.worker import _compose, _verify
+
+
+def test_subscription_candidates_are_separate_from_library(monkeypatch):
+    from sqlalchemy import func
+
+    from services.api.app.models import PaperCandidate, Recommendation, Subscription
+    from services.api.app.worker import refresh_subscriptions
+
+    Base.metadata.create_all(engine)
+
+    work = {
+        "title": "A New Study of Scientific Agents",
+        "authors": ["Researcher"],
+        "abstract": "We study scientific agents with reproducible experiments.",
+        "year": 2026,
+        "published_at": "2026-10-15",
+        "doi": None,
+        "openalex_id": "https://openalex.org/W123456789",
+        "arxiv_id": None,
+        "pdf_url": None,
+        "citation_count": 3,
+        "source": "OpenAlex",
+        "source_url": "https://openalex.org/W123456789",
+    }
+    monkeypatch.setattr("services.api.app.worker.search_external", lambda *_args: [work])
+    monkeypatch.setattr(
+        "services.api.app.worker.search_arxiv", lambda *_args: [{**work, "source": "arXiv"}]
+    )
+    monkeypatch.setattr("services.api.app.worker.enrich_candidate", lambda _candidate: None)
+    model_calls = []
+
+    def analyze(_system, prompt, **_kwargs):
+        model_calls.append(1)
+        return json.dumps(
+            {
+                "items": [
+                    {
+                        "id": paper["id"],
+                        "relevance_score": 92,
+                        "value_score": 78,
+                        "summary": "研究科研智能体",
+                        "reason": "与主题相关",
+                    }
+                    for paper in json.loads(prompt)["papers"]
+                ]
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.api.app.recommender.generate",
+        analyze,
+    )
+    with SessionLocal() as db:
+        before = db.scalar(select(func.count()).select_from(Paper))
+        sub = Subscription(owner_id="recommendation-test", topic="scientific agents")
+        db.add(sub)
+        db.commit()
+        sub_id = sub.id
+    refresh_subscriptions.run(sub_id)
+    with SessionLocal() as db:
+        first = db.scalar(
+            select(Recommendation).where(Recommendation.owner_id == "recommendation-test")
+        )
+        assert first.relevance_score == 92
+        assert first.topics == ["scientific agents"]
+    refresh_subscriptions.run(sub_id)
+    assert len(model_calls) == 1
+    with SessionLocal() as db:
+        second_sub = Subscription(owner_id="recommendation-test", topic="agent evaluation")
+        db.add(second_sub)
+        db.commit()
+        second_sub_id = second_sub.id
+    refresh_subscriptions.run(second_sub_id)
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Paper)) == before
+        assert db.scalar(select(func.count()).select_from(PaperCandidate)) == 1
+        recs = db.scalars(
+            select(Recommendation).where(Recommendation.owner_id == "recommendation-test")
+        ).all()
+        assert len(recs) == 1
+        assert recs[0].score > 0
+        assert recs[0].summary == "研究科研智能体"
+        assert recs[0].paper_id is None
+        assert recs[0].topics == ["scientific agents", "agent evaluation"]
+
+
+def test_recommendation_feedback_and_explicit_import(monkeypatch):
+    from services.api.app.models import PaperCandidate, Recommendation
+
+    Base.metadata.create_all(engine)
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/v1/auth/login", json={"email": "demo@example.com", "password": "change-me"}
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        with SessionLocal() as db:
+            candidate = PaperCandidate(
+                title_key="recommendationimportfixture",
+                title="Recommendation Import Fixture",
+                authors=["A"],
+                abstract="A paper about agents.",
+                source="arXiv",
+                source_url="https://arxiv.org/abs/2601.12345",
+                arxiv_id="2601.12345",
+            )
+            db.add(candidate)
+            db.flush()
+            imported = Recommendation(
+                owner_id="demo@example.com", candidate_id=candidate.id, score=85, topics=["agents"]
+            )
+            dismissed = PaperCandidate(
+                title_key="dismissfixture",
+                title="Dismiss Fixture",
+                authors=["B"],
+                abstract="Unrelated.",
+                source="arXiv",
+            )
+            db.add(dismissed)
+            db.flush()
+            negative = Recommendation(
+                owner_id="demo@example.com", candidate_id=dismissed.id, score=12, topics=["agents"]
+            )
+            db.add_all([imported, negative])
+            db.commit()
+            import_id, negative_id = imported.id, negative.id
+        pending = client.get("/api/v1/recommendations", headers=headers).json()
+        assert any(x["id"] == import_id for x in pending["items"])
+        assert (
+            client.post(
+                f"/api/v1/recommendations/{negative_id}/feedback",
+                json={"value": -1},
+                headers=headers,
+            ).status_code
+            == 200
+        )
+        pending = client.get("/api/v1/recommendations", headers=headers).json()
+        assert all(x["id"] != negative_id for x in pending["items"])
+        monkeypatch.setattr("services.api.app.main.search_arxiv", lambda *_args: 1 / 0)
+        response = client.post(f"/api/v1/recommendations/{import_id}/import", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["status"] == "metadata_only"
+        with SessionLocal() as db:
+            rec = db.get(Recommendation, import_id)
+            assert rec.status == "imported"
+            assert db.get(Paper, rec.paper_id).title == "Recommendation Import Fixture"
+
+
+def test_recommendation_missing_metrics_are_unknown(monkeypatch):
+    from datetime import datetime
+
+    from services.api.app.models import PaperCandidate
+    from services.api.app.recommender import score_analyses, weighted_score
+
+    candidate = PaperCandidate(
+        id="candidate-test",
+        title_key="candidate-test",
+        title="Fixture",
+        authors=[],
+        abstract="An abstract",
+        source="arXiv",
+        published_at=datetime(2026, 10, 1),
+    )
+    monkeypatch.setattr("services.api.app.recommender.generate", lambda *_args, **_kwargs: 1 / 0)
+    assert score_analyses("topic", [candidate]) == {}
+    score, factors = weighted_score(candidate, None)
+    assert 0 <= score <= 100
+    assert factors["citations"] is None
+    assert factors["github_stars"] is None
+    assert factors["relevance"] is None
+    _, scored = weighted_score(candidate, {"relevance_score": 80, "value_score": 70})
+    assert scored["effective_weights"] == {
+        "relevance": 60.0,
+        "value": 33.3,
+        "recency": 6.7,
+    }
+
+
+def test_subscription_retries_partial_source_and_unscored_candidate(monkeypatch):
+    from services.api.app.models import Recommendation, Subscription
+    from services.api.app.worker import refresh_subscriptions
+
+    Base.metadata.create_all(engine)
+    work = {
+        "title": "Retry Candidate Fixture",
+        "authors": ["A"],
+        "abstract": "We evaluate a new method.",
+        "year": 2026,
+        "published_at": "2026-10-01",
+        "doi": None,
+        "arxiv_id": "2601.23456",
+        "openalex_id": None,
+        "pdf_url": None,
+        "citation_count": None,
+        "source": "arXiv",
+        "source_url": "https://arxiv.org/abs/2601.23456",
+    }
+    monkeypatch.setattr("services.api.app.worker.search_external", lambda *_args: [work])
+    monkeypatch.setattr("services.api.app.worker.search_arxiv", lambda *_args: 1 / 0)
+    monkeypatch.setattr("services.api.app.worker.enrich_candidate", lambda _candidate: None)
+    monkeypatch.setattr("services.api.app.worker.score_analyses", lambda *_args: {})
+    with SessionLocal() as db:
+        sub = Subscription(owner_id="retry-test", topic="new method")
+        db.add(sub)
+        db.commit()
+        sub_id = sub.id
+    refresh_subscriptions.run(sub_id)
+    with SessionLocal() as db:
+        assert db.get(Subscription, sub_id).last_checked_at is None
+        rec = db.scalar(select(Recommendation).where(Recommendation.owner_id == "retry-test"))
+        assert rec.relevance_score is None
+        assert rec.score is None
+    monkeypatch.setattr("services.api.app.worker.search_external", lambda *_args: [])
+    monkeypatch.setattr("services.api.app.worker.search_arxiv", lambda *_args: [])
+    monkeypatch.setattr(
+        "services.api.app.worker.score_analyses",
+        lambda _topic, candidates: {
+            candidate.id: {
+                "relevance_score": 75,
+                "value_score": 66,
+                "summary": "研究新方法",
+                "reason": "与主题相关",
+            }
+            for candidate in candidates
+        },
+    )
+    refresh_subscriptions.run(sub_id)
+    with SessionLocal() as db:
+        assert db.get(Subscription, sub_id).last_checked_at is not None
+        rec = db.scalar(select(Recommendation).where(Recommendation.owner_id == "retry-test"))
+        assert rec.relevance_score == 75
+
+
+def test_subscription_can_pause_resume_and_refresh(monkeypatch):
+    queued = []
+    monkeypatch.setattr("services.api.app.main.refresh_subscriptions.delay", queued.append)
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/v1/auth/login", json={"email": "demo@example.com", "password": "change-me"}
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        first = client.post(
+            "/api/v1/subscriptions", json={"topic": "Fixture Topic"}, headers=headers
+        )
+        assert first.status_code == 200
+        sub_id = first.json()["id"]
+        duplicate = client.post(
+            "/api/v1/subscriptions", json={"topic": "fixture topic"}, headers=headers
+        )
+        assert duplicate.json()["id"] == sub_id
+        paused = client.patch(
+            f"/api/v1/subscriptions/{sub_id}", json={"active": False}, headers=headers
+        )
+        assert paused.json()["active"] is False
+        assert (
+            client.post(f"/api/v1/subscriptions/{sub_id}/refresh", headers=headers).status_code
+            == 409
+        )
+        resumed = client.patch(
+            f"/api/v1/subscriptions/{sub_id}", json={"active": True}, headers=headers
+        )
+        assert resumed.json()["active"] is True
+        assert client.post(f"/api/v1/subscriptions/{sub_id}/refresh", headers=headers).json()[
+            "queued"
+        ]
+        assert queued == [sub_id, sub_id, sub_id, sub_id]
+
 
 ROOT = Path(__file__).resolve().parents[3]
 SAMPLES = ROOT / "科研小助手" / "pdf"
@@ -460,6 +726,7 @@ def test_react_reads_document_position_before_answer(monkeypatch):
     source_id = "11111111-1111-1111-1111-111111111111"
     events = []
     monkeypatch.setattr(chat_agent, "_ask_model", lambda *_args: next(decisions))
+    monkeypatch.setattr(chat_agent, "generate", lambda _system, answer, **_kwargs: answer)
     monkeypatch.setattr(
         chat_agent,
         "_read_one",

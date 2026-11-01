@@ -29,6 +29,7 @@ from .models import (
     Chunk,
     CitationEdge,
     Paper,
+    PaperCandidate,
     Recommendation,
     RunEvent,
     Subscription,
@@ -146,6 +147,10 @@ class DiagramIn(BaseModel):
 
 class SubscriptionIn(BaseModel):
     topic: str = Field(min_length=2)
+
+
+class SubscriptionUpdateIn(BaseModel):
+    active: bool
 
 
 class FeedbackIn(BaseModel):
@@ -872,9 +877,14 @@ def import_paper(data: ImportIn, user: str = Depends(current_user), db: Session 
         arxiv_id=data.arxiv_id,
         source="arXiv" if data.arxiv_id else "OpenAlex",
     )
+    return persist_discovered_paper(
+        db, paper, (metadata.get("best_oa_location") or {}).get("pdf_url"), user
+    )
+
+
+def persist_discovered_paper(db: Session, paper: Paper, pdf_url: str | None, user: str) -> dict:
     db.add(paper)
     db.commit()
-    pdf_url = (metadata.get("best_oa_location") or {}).get("pdf_url")
     if not pdf_url:
         return {"paper_id": paper.id, "task_id": None, "status": "metadata_only"}
     try:
@@ -907,7 +917,7 @@ def import_paper(data: ImportIn, user: str = Depends(current_user), db: Session 
 def list_subscriptions(user: str = Depends(current_user), db: Session = Depends(get_db)):
     return {
         "items": [
-            {"id": s.id, "topic": s.topic, "active": s.active}
+            {"id": s.id, "topic": s.topic, "active": s.active, "last_checked_at": s.last_checked_at}
             for s in db.scalars(select(Subscription).where(Subscription.owner_id == user))
         ]
     }
@@ -917,32 +927,154 @@ def list_subscriptions(user: str = Depends(current_user), db: Session = Depends(
 def subscribe(
     data: SubscriptionIn, user: str = Depends(current_user), db: Session = Depends(get_db)
 ):
-    sub = Subscription(owner_id=user, topic=data.topic)
-    db.add(sub)
+    topic = " ".join(data.topic.split())
+    if len(topic) < 2:
+        raise HTTPException(422, "Topic is too short")
+    sub = db.scalar(
+        select(Subscription).where(
+            Subscription.owner_id == user, func.lower(Subscription.topic) == topic.casefold()
+        )
+    )
+    if sub is None:
+        sub = Subscription(owner_id=user, topic=topic)
+        db.add(sub)
+    sub.active = True
     db.commit()
-    refresh_subscriptions.delay()
+    refresh_subscriptions.delay(sub.id)
     return {"id": sub.id, "topic": sub.topic}
 
 
+@app.patch(API + "/subscriptions/{subscription_id}")
+def update_subscription(
+    subscription_id: str,
+    data: SubscriptionUpdateIn,
+    user: str = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    sub = db.get(Subscription, subscription_id)
+    if not sub or sub.owner_id != user:
+        raise HTTPException(404, "Subscription not found")
+    sub.active = data.active
+    db.commit()
+    if sub.active:
+        refresh_subscriptions.delay(sub.id)
+    return {"id": sub.id, "topic": sub.topic, "active": sub.active}
+
+
+@app.post(API + "/subscriptions/{subscription_id}/refresh")
+def refresh_subscription(
+    subscription_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    sub = db.get(Subscription, subscription_id)
+    if not sub or sub.owner_id != user:
+        raise HTTPException(404, "Subscription not found")
+    if not sub.active:
+        raise HTTPException(409, "Activate subscription before refreshing")
+    refresh_subscriptions.delay(sub.id)
+    return {"id": sub.id, "queued": True}
+
+
 @app.get(API + "/recommendations")
-def recommendations(user: str = Depends(current_user), db: Session = Depends(get_db)):
+def recommendations(
+    topic: str | None = None,
+    status: str = Query(default="pending", pattern="^(pending|imported|dismissed|all)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=12, ge=1, le=50),
+    user: str = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    query = select(Recommendation).where(Recommendation.owner_id == user)
+    if status != "all":
+        query = query.where(Recommendation.status == status)
     items = db.scalars(
-        select(Recommendation)
-        .where(Recommendation.owner_id == user)
-        .order_by(Recommendation.score.desc())
+        query.order_by(Recommendation.score.desc().nullslast(), Recommendation.created_at.desc())
     ).all()
+    if topic:
+        items = [item for item in items if topic in item.topics]
+    total = len(items)
+    items = items[(page - 1) * page_size : page * page_size]
     return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
         "items": [
             {
                 "id": x.id,
-                "paper": paper_json(db.get(Paper, x.paper_id)),
+                "candidate": candidate_json(db.get(PaperCandidate, x.candidate_id)),
+                "paper_id": x.paper_id,
                 "score": x.score,
                 "scoring_factors": x.reasons,
+                "scoring_weights": x.reasons.get("effective_weights", {}),
                 "feedback": x.feedback,
+                "topics": x.topics,
+                "summary": x.summary,
+                "reason": x.reason,
+                "status": x.status,
             }
             for x in items
-        ]
+        ],
     }
+
+
+def candidate_json(candidate: PaperCandidate) -> dict:
+    return {
+        key: getattr(candidate, key)
+        for key in (
+            "id",
+            "title",
+            "authors",
+            "abstract",
+            "published_at",
+            "year",
+            "source",
+            "source_url",
+            "doi",
+            "arxiv_id",
+            "openalex_id",
+            "pdf_url",
+            "github_url",
+            "citation_count",
+            "github_stars",
+        )
+    }
+
+
+@app.post(API + "/recommendations/{recommendation_id}/import")
+def import_recommendation(
+    recommendation_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    item = db.get(Recommendation, recommendation_id)
+    if not item or item.owner_id != user:
+        raise HTTPException(404, "Recommendation not found")
+    if item.paper_id:
+        return {"paper_id": item.paper_id, "task_id": None, "status": "already_imported"}
+    candidate = db.get(PaperCandidate, item.candidate_id)
+    if not candidate:
+        raise HTTPException(404, "Candidate not found")
+    checks = [Paper.title == candidate.title]
+    for field in ("doi", "arxiv_id", "openalex_id"):
+        if getattr(candidate, field):
+            checks.append(getattr(Paper, field) == getattr(candidate, field))
+    existing = db.scalar(select(Paper).where(Paper.owner_id == user, or_(*checks)))
+    if existing:
+        result = {"paper_id": existing.id, "task_id": None, "status": "already_imported"}
+    else:
+        paper = Paper(
+            owner_id=user,
+            title=candidate.title,
+            authors=candidate.authors,
+            abstract=candidate.abstract,
+            year=candidate.year,
+            doi=candidate.doi,
+            arxiv_id=candidate.arxiv_id,
+            openalex_id=candidate.openalex_id,
+            source=candidate.source,
+        )
+        result = persist_discovered_paper(db, paper, candidate.pdf_url, user)
+    item.paper_id = result["paper_id"]
+    item.status = "imported"
+    db.commit()
+    return result
 
 
 @app.post(API + "/recommendations/{recommendation_id}/feedback")
@@ -956,9 +1088,10 @@ def feedback(
     if not item or item.owner_id != user:
         raise HTTPException(404, "Recommendation not found")
     item.feedback = data.value
-    item.score = max(0, min(1, item.score + data.value * 0.1))
+    if data.value < 0:
+        item.status = "dismissed"
     db.commit()
-    return {"feedback_id": item.id, "score": item.score}
+    return {"feedback_id": item.id, "status": item.status, "feedback": item.feedback}
 
 
 @app.post(API + "/graphs")

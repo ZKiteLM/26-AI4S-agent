@@ -4,6 +4,7 @@ import os
 import re
 import time
 from collections import defaultdict, deque
+from datetime import timedelta
 
 from celery import Celery
 from langgraph.graph import END, START, StateGraph
@@ -14,7 +15,7 @@ from .ai import generate
 from .chat_agent import author_order_answer, number_citations, run_react
 from .config import settings
 from .db import SessionLocal
-from .discovery import inspect_github, search_arxiv, search_external
+from .discovery import search_arxiv, search_external
 from .models import (
     AgentRun,
     BackgroundTask,
@@ -23,6 +24,7 @@ from .models import (
     ChatSession,
     Chunk,
     Paper,
+    PaperCandidate,
     Recommendation,
     RunEvent,
     Subscription,
@@ -32,6 +34,7 @@ from .models import (
 )
 from .observability import record
 from .parsing import parse_pdf
+from .recommender import enrich_candidate, score_analyses, upsert_candidate, upsert_recommendation
 from .retrieval import first_page_evidence, index_chunks, make_chunks, remove_version_index, search
 from .storage import Storage
 
@@ -510,69 +513,98 @@ def run_agent(run_id: str) -> None:
 
 
 @celery_app.task(name="research.refresh_subscriptions")
-def refresh_subscriptions() -> None:
+def refresh_subscriptions(subscription_id: str | None = None) -> None:
     record("worker", "INFO", "开始更新论文订阅")
     with SessionLocal() as db:
-        for sub in db.scalars(select(Subscription).where(Subscription.active.is_(True))):
+        statement = select(Subscription).where(Subscription.active.is_(True))
+        if subscription_id:
+            statement = statement.where(Subscription.id == subscription_id)
+        for sub in db.scalars(statement).all():
+            cutoff = max(
+                (sub.last_checked_at.date() if sub.last_checked_at else now().date())
+                - timedelta(days=1 if sub.last_checked_at else 30),
+                now().date() - timedelta(days=30),
+            )
             works = []
+            openalex_ok = arxiv_ok = False
             try:
-                works.extend(search_external(sub.topic, 15))
+                works.extend(search_external(sub.topic, 25, cutoff))
+                openalex_ok = True
             except Exception:
                 logger.exception("OpenAlex subscription refresh failed for %s", sub.id)
             try:
-                works.extend(search_arxiv(sub.topic, 15))
+                works.extend(search_arxiv(sub.topic, 25, cutoff))
+                arxiv_ok = True
             except Exception:
                 logger.exception("arXiv subscription refresh failed for %s", sub.id)
-            for work in works:
-                existing = (
-                    db.scalar(
-                        select(Paper).where(
-                            Paper.owner_id == sub.owner_id, Paper.openalex_id == work["openalex_id"]
-                        )
-                    )
-                    if work["openalex_id"]
-                    else None
+            seen = set()
+            candidates = []
+            for work in works[:30]:
+                if not work.get("title") or not work.get("abstract"):
+                    continue
+                try:
+                    with db.begin_nested():
+                        candidate = upsert_candidate(db, work)
+                        if candidate.id not in seen:
+                            enrich_candidate(candidate)
+                            db.flush()
+                            seen.add(candidate.id)
+                            candidates.append(candidate)
+                except Exception:
+                    logger.exception("Candidate refresh failed for %s", work.get("title"))
+            # Retry unfinished analyses and missing external metrics even after a paper
+            # has fallen outside the incremental publication window.
+            pending = db.scalars(
+                select(Recommendation).where(
+                    Recommendation.owner_id == sub.owner_id,
+                    Recommendation.status == "pending",
                 )
-                if not existing and work["arxiv_id"]:
-                    existing = db.scalar(
-                        select(Paper).where(
-                            Paper.owner_id == sub.owner_id, Paper.arxiv_id == work["arxiv_id"]
-                        )
+            ).all()
+            for rec in pending:
+                if len(candidates) >= 50:
+                    break
+                if sub.topic not in rec.topics or rec.candidate_id in seen:
+                    continue
+                candidate = db.get(PaperCandidate, rec.candidate_id)
+                if not candidate or (
+                    rec.relevance_score is not None
+                    and candidate.citation_count is not None
+                    and (not candidate.github_url or candidate.github_stars is not None)
+                ):
+                    continue
+                try:
+                    with db.begin_nested():
+                        enrich_candidate(candidate)
+                        db.flush()
+                        seen.add(candidate.id)
+                        candidates.append(candidate)
+                except Exception:
+                    logger.exception("Candidate enrichment retry failed for %s", rec.candidate_id)
+            needs_analysis = []
+            for candidate in candidates:
+                existing = db.scalar(
+                    select(Recommendation).where(
+                        Recommendation.owner_id == sub.owner_id,
+                        Recommendation.candidate_id == candidate.id,
                     )
-                if not existing:
-                    existing = db.scalar(
-                        select(Paper).where(
-                            Paper.owner_id == sub.owner_id, Paper.title == work["title"]
-                        )
-                    )
-                paper = existing or Paper(
-                    owner_id=sub.owner_id,
-                    title=work["title"],
-                    authors=work["authors"],
-                    abstract=work["abstract"],
-                    year=work["year"],
-                    doi=work["doi"],
-                    arxiv_id=work["arxiv_id"],
-                    openalex_id=work["openalex_id"],
-                    source=work["source"],
                 )
-                if not existing:
-                    db.add(paper)
-                    db.flush()
-                if not db.scalar(select(Recommendation).where(Recommendation.paper_id == paper.id)):
-                    code = inspect_github(work["abstract"])
-                    db.add(
-                        Recommendation(
-                            owner_id=sub.owner_id,
-                            paper_id=paper.id,
-                            score=0.5
-                            + (0.15 if work["pdf_url"] else 0)
-                            + (0.2 if code["verified"] else 0),
-                            reasons={
-                                "topic": sub.topic,
-                                "open_access_pdf": bool(work["pdf_url"]),
-                                "github": code,
-                            },
+                if not existing or (
+                    existing.status == "pending"
+                    and (existing.relevance_score is None or sub.topic not in existing.topics)
+                ):
+                    needs_analysis.append(candidate)
+            analyses = {}
+            for index in range(0, len(needs_analysis), 4):
+                analyses.update(score_analyses(sub.topic, needs_analysis[index : index + 4]))
+            for candidate in candidates:
+                try:
+                    with db.begin_nested():
+                        upsert_recommendation(
+                            db, sub.owner_id, sub.topic, candidate, analyses.get(candidate.id)
                         )
-                    )
+                        db.flush()
+                except Exception:
+                    logger.exception("Recommendation scoring failed for %s", candidate.id)
+            if openalex_ok and arxiv_ok:
+                sub.last_checked_at = now()
             db.commit()

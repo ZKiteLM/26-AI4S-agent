@@ -1,7 +1,17 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -166,13 +176,45 @@ class Subscription(Base):
     owner_id: Mapped[str] = mapped_column(String(80), index=True)
     topic: Mapped[str] = mapped_column(String(255))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PaperCandidate(Base):
+    __tablename__ = "paper_candidates"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    title_key: Mapped[str] = mapped_column(Text, unique=True)
+    title: Mapped[str] = mapped_column(Text)
+    authors: Mapped[list] = mapped_column(JSON, default=list)
+    abstract: Mapped[str] = mapped_column(Text, default="")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(80))
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    doi: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    arxiv_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    openalex_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    pdf_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    github_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    citation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class Recommendation(Base):
     __tablename__ = "recommendations"
+    __table_args__ = (UniqueConstraint("owner_id", "candidate_id"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(80), index=True)
-    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id"), index=True)
-    score: Mapped[float] = mapped_column(Float)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("paper_candidates.id"), index=True)
+    paper_id: Mapped[str | None] = mapped_column(ForeignKey("papers.id"), nullable=True, index=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasons: Mapped[dict] = mapped_column(JSON, default=dict)
     feedback: Mapped[int] = mapped_column(Integer, default=0)
+    topics: Mapped[list] = mapped_column(JSON, default=list)
+    relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    value_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
