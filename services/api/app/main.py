@@ -15,10 +15,12 @@ from sse_starlette.sse import EventSourceResponse
 from .ai import generate
 from .auth import check_login, current_user, make_token
 from .charts import render_chart
+from .citation_graph_service import add_seed_paper, serialize_view
+from .citation_identity import link_paper_to_work, normalize_identifier
 from .config import settings
 from .db import Base, SessionLocal, engine, get_db
 from .discovery import safe_pdf_download, search_arxiv, search_external
-from .graphs import build_graph, future_work
+from .graphs import future_work
 from .models import (
     AgentRun,
     Artifact,
@@ -28,6 +30,9 @@ from .models import (
     ChatSession,
     Chunk,
     CitationEdge,
+    GraphInsight,
+    GraphView,
+    GraphViewNode,
     Paper,
     PaperCandidate,
     Recommendation,
@@ -46,7 +51,15 @@ from .retrieval import remove_version_index
 from .storage import Storage
 from .subscription_keywords import generate_keywords, normalize_keywords
 from .translation import translate_blocks, translate_text
-from .worker import celery_app, enqueue_subscription_refresh, parse_version, run_agent
+from .worker import (
+    build_citation_graph,
+    celery_app,
+    enqueue_subscription_refresh,
+    expand_citation_graph,
+    generate_graph_insight,
+    parse_version,
+    run_agent,
+)
 
 
 @asynccontextmanager
@@ -135,7 +148,23 @@ class ImportIn(BaseModel):
 
 
 class GraphIn(BaseModel):
-    paper_ids: list[str] = Field(min_length=2)
+    paper_ids: list[str] = Field(default_factory=list)
+    external_seeds: list[dict[str, str]] = Field(default_factory=list, max_length=5)
+    mode: str = "explore"
+    direction: str = "both"
+    per_direction_limit: int = Field(default=20, ge=1, le=50)
+
+
+class GraphExpandIn(BaseModel):
+    work_id: str
+    direction: str = "both"
+    per_direction_limit: int = Field(default=20, ge=1, le=50)
+
+
+class GraphRefreshIn(BaseModel):
+    work_id: str
+    direction: str = "both"
+    per_direction_limit: int = Field(default=20, ge=1, le=50)
 
 
 class DraftIn(BaseModel):
@@ -235,8 +264,6 @@ async def upload_papers(
     user: str = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    if len(files) > 20:
-        raise HTTPException(400, "Upload at most 20 PDFs at once")
     result = {"paper_ids": [], "version_ids": [], "task_ids": [], "conflicts": []}
     for file in files:
         data = await file.read(50_000_001)
@@ -1244,21 +1271,275 @@ def feedback(
 
 @app.post(API + "/graphs")
 def create_graph(data: GraphIn, user: str = Depends(current_user), db: Session = Depends(get_db)):
-    for paper_id in data.paper_ids:
-        owned_paper(db, paper_id, user)
-    graph = build_graph(db, user, data.paper_ids)
-    task = BackgroundTask(owner_id=user, type="graph", status="completed", progress=1, result=graph)
+    if data.mode not in ("internal", "explore"):
+        raise HTTPException(422, "Invalid graph mode")
+    if data.mode == "internal" and (len(set(data.paper_ids)) < 2 or data.external_seeds):
+        raise HTTPException(
+            422, "Internal analysis needs at least two library papers and no external seeds"
+        )
+    if data.direction not in ("references", "citations", "both"):
+        raise HTTPException(422, "Invalid direction")
+    if not data.paper_ids and not data.external_seeds:
+        raise HTTPException(422, "Select at least one seed")
+    for seed in data.external_seeds:
+        if seed.get("type") not in ("doi", "arxiv", "openalex") or not normalize_identifier(
+            seed["type"], seed.get("value")
+        ):
+            raise HTTPException(422, "External seed needs a valid DOI, arXiv or OpenAlex ID")
+    view = GraphView(
+        owner_id=user,
+        config={
+            "mode": data.mode,
+            "direction": data.direction,
+            "per_direction_limit": data.per_direction_limit,
+            "external_seeds": data.external_seeds,
+        },
+    )
+    db.add(view)
+    db.flush()
+    for paper_id in dict.fromkeys(data.paper_ids):
+        add_seed_paper(db, view, owned_paper(db, paper_id, user))
+    task = BackgroundTask(owner_id=user, type="citation_graph", args={"graph_id": view.id})
     db.add(task)
     db.commit()
-    return {"graph_id": task.id, "task_id": task.id}
+    build_citation_graph.delay(task.id, view.id)
+    return {"graph_id": view.id, "task_id": task.id, "status": "queued"}
+
+
+@app.get(API + "/graphs")
+def list_graphs(user: str = Depends(current_user), db: Session = Depends(get_db)):
+    views = db.scalars(
+        select(GraphView).where(GraphView.owner_id == user).order_by(GraphView.updated_at.desc())
+    ).all()
+    return {
+        "items": [
+            {
+                "id": view.id,
+                "status": view.status,
+                "mode": view.config.get("mode", "explore"),
+                "updated_at": view.updated_at,
+                "node_count": db.scalar(
+                    select(func.count())
+                    .select_from(GraphViewNode)
+                    .where(GraphViewNode.graph_id == view.id)
+                ),
+            }
+            for view in views
+        ]
+    }
 
 
 @app.get(API + "/graphs/{graph_id}")
 def get_graph(graph_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)):
-    graph = db.get(BackgroundTask, graph_id)
-    if not graph or graph.owner_id != user or graph.type != "graph":
+    graph = db.get(GraphView, graph_id)
+    if not graph or graph.owner_id != user:
         raise HTTPException(404, "Graph not found")
-    return graph.result
+    return serialize_view(db, graph)
+
+
+def owned_graph(db: Session, graph_id: str, user: str, *, lock: bool = False) -> GraphView:
+    query = select(GraphView).where(GraphView.id == graph_id)
+    view = db.scalar(query.with_for_update() if lock else query)
+    if not view or view.owner_id != user:
+        raise HTTPException(404, "Graph not found")
+    return view
+
+
+def active_graph_task(db: Session, graph_id: str, kind: str | None = None) -> BackgroundTask | None:
+    tasks = db.scalars(
+        select(BackgroundTask).where(
+            BackgroundTask.type.in_(("citation_graph", "graph_insight")),
+            BackgroundTask.status.in_(("queued", "running")),
+        )
+    ).all()
+    return next(
+        (
+            task
+            for task in tasks
+            if task.args.get("graph_id") == graph_id
+            and (kind is None or task.args.get("kind") == kind)
+        ),
+        None,
+    )
+
+
+@app.get(API + "/graphs/{graph_id}/insights")
+def get_graph_insights(
+    graph_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    view = owned_graph(db, graph_id, user)
+    records = db.scalars(select(GraphInsight).where(GraphInsight.graph_id == graph_id)).all()
+    review = next((record for record in records if record.kind == "review"), None)
+    return {
+        record.kind: {
+            "content": record.content,
+            "sources": record.sources,
+            "graph_version": record.graph_version,
+            "stale": record.graph_version != view.version
+            or (
+                record.kind == "future"
+                and review is not None
+                and record.updated_at < review.updated_at
+            ),
+            "updated_at": record.updated_at,
+        }
+        for record in records
+    }
+
+
+@app.post(API + "/graphs/{graph_id}/insights/{kind}")
+def queue_graph_insight(
+    graph_id: str, kind: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    view = owned_graph(db, graph_id, user, lock=True)
+    if kind not in ("review", "future"):
+        raise HTTPException(422, "Invalid insight kind")
+    if view.status in ("queued", "running") or not db.scalar(
+        select(GraphViewNode.id).where(GraphViewNode.graph_id == graph_id).limit(1)
+    ):
+        raise HTTPException(409, "Build the graph before generating an insight")
+    if running := active_graph_task(db, graph_id, kind):
+        return {"task_id": running.id, "status": running.status}
+    if active_graph_task(db, graph_id):
+        raise HTTPException(409, "Wait for the current graph task to finish")
+    task = BackgroundTask(
+        owner_id=user,
+        type="graph_insight",
+        args={"graph_id": graph_id, "kind": kind, "version": view.version},
+    )
+    db.add(task)
+    db.commit()
+    generate_graph_insight.delay(task.id, graph_id, kind)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.delete(API + "/graphs/{graph_id}")
+def delete_graph(graph_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)):
+    view = owned_graph(db, graph_id, user, lock=True)
+    if active_graph_task(db, graph_id):
+        raise HTTPException(409, "Graph has a running task; retry when it finishes")
+    db.execute(delete(GraphInsight).where(GraphInsight.graph_id == graph_id))
+    db.execute(delete(GraphViewNode).where(GraphViewNode.graph_id == graph_id))
+    db.delete(view)
+    db.commit()
+    return {"deleted": True}
+
+
+def graph_task(db: Session, user: str, graph_id: str, data: GraphExpandIn, force: bool = False):
+    view = db.scalar(select(GraphView).where(GraphView.id == graph_id).with_for_update())
+    if not view or view.owner_id != user:
+        raise HTTPException(404, "Graph not found")
+    if view.config.get("mode") == "internal":
+        raise HTTPException(409, "Internal analysis has a fixed paper set")
+    if data.direction not in ("references", "citations", "both"):
+        raise HTTPException(422, "Invalid direction")
+    node = db.scalar(
+        select(GraphViewNode).where(
+            GraphViewNode.graph_id == graph_id,
+            GraphViewNode.work_id == data.work_id,
+        )
+    )
+    if not node:
+        raise HTTPException(404, "Graph node not found")
+    for task in db.scalars(
+        select(BackgroundTask).where(
+            BackgroundTask.owner_id == user,
+            BackgroundTask.type == "citation_graph",
+            BackgroundTask.status.in_(("queued", "running")),
+        )
+    ):
+        if task.args.get("graph_id") == graph_id:
+            return {"graph_id": graph_id, "task_id": task.id, "status": task.status}
+    task = BackgroundTask(
+        owner_id=user,
+        type="citation_graph",
+        args={
+            "graph_id": graph_id,
+            "work_id": data.work_id,
+            "direction": data.direction,
+            "limit": data.per_direction_limit,
+            "force": force,
+        },
+    )
+    db.add(task)
+    db.commit()
+    expand_citation_graph.delay(
+        task.id, graph_id, data.work_id, data.direction, data.per_direction_limit, force
+    )
+    return {"graph_id": graph_id, "task_id": task.id, "status": "queued"}
+
+
+@app.post(API + "/graphs/{graph_id}/expand")
+def expand_graph(
+    graph_id: str,
+    data: GraphExpandIn,
+    user: str = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    return graph_task(db, user, graph_id, data)
+
+
+@app.post(API + "/graphs/{graph_id}/refresh")
+def refresh_graph(
+    graph_id: str,
+    data: GraphRefreshIn,
+    user: str = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    return graph_task(db, user, graph_id, data, force=True)
+
+
+@app.get(API + "/graphs/{graph_id}/nodes/{work_id}")
+def get_graph_node(
+    graph_id: str, work_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    graph = db.get(GraphView, graph_id)
+    if not graph or graph.owner_id != user:
+        raise HTTPException(404, "Graph not found")
+    node = next(
+        (node for node in serialize_view(db, graph)["nodes"] if node["id"] == work_id), None
+    )
+    if not node:
+        raise HTTPException(404, "Graph node not found")
+    return node
+
+
+@app.post(API + "/graphs/{graph_id}/nodes/{work_id}/import")
+def import_graph_node(
+    graph_id: str, work_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    view = db.get(GraphView, graph_id)
+    if not view or view.owner_id != user:
+        raise HTTPException(404, "Graph not found")
+    node = db.scalar(
+        select(GraphViewNode).where(
+            GraphViewNode.graph_id == graph_id,
+            GraphViewNode.work_id == work_id,
+        )
+    )
+    if not node:
+        raise HTTPException(404, "Graph node not found")
+    from .models import ScholarlyWork
+
+    work = db.get(ScholarlyWork, work_id)
+    existing = db.scalar(select(Paper).where(Paper.owner_id == user, Paper.work_id == work_id))
+    if existing:
+        return {"paper_id": existing.id, "status": "already_imported"}
+    paper = Paper(
+        owner_id=user,
+        title=work.title,
+        authors=work.authors,
+        abstract=work.abstract,
+        year=work.year,
+        doi=work.doi,
+        arxiv_id=work.arxiv_id,
+        openalex_id=f"https://openalex.org/{work.openalex_id}" if work.openalex_id else None,
+        source=work.metadata_source,
+    )
+    db.add(paper)
+    link_paper_to_work(db, paper, work)
+    url = f"https://arxiv.org/pdf/{work.arxiv_id}" if work.arxiv_id else None
+    return persist_discovered_paper(db, paper, url, user)
 
 
 @app.post(API + "/research/synthesize")

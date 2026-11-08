@@ -24,11 +24,22 @@ uv run alembic upgrade head
 
 Compose 的基础镜像可通过 `.env` 中的 `POSTGRES_IMAGE`、`REDIS_IMAGE`、`QDRANT_IMAGE`、`ELASTICSEARCH_IMAGE`、`MINIO_IMAGE`、`NODE_IMAGE` 替换；这台 Mac 的 Docker Hub/Quay 拉取不稳定时，已验证预装的 `postgres:17`、`redis:7`、`cgr.dev/chainguard/minio:latest` 及 `mirror.gcr.io/library/node:24-alpine` 可用。
 
+首次按上面的步骤配置并安装依赖后，在**项目根目录**使用以下命令管理本地全部服务（PostgreSQL、Redis、Qdrant、Elasticsearch、MinIO、API、默认/解析 Worker、Beat、前端；使用本地 Ollama 时也会按需启动）：
+
+```bash
+python3 scripts/local_services.py start    # 启动
+python3 scripts/local_services.py stop     # 关闭
+python3 scripts/local_services.py restart  # 重启
+python3 scripts/local_services.py status   # 查看状态
+```
+
+脚本会运行数据库迁移；各宿主机服务的日志位于 `.local_services/*.log`。`stop` 会关闭脚本启动的进程、从当前项目目录手动启动的旧进程、当前项目的旧 `ai4s.*` macOS LaunchAgent，以及本项目的 Compose 基础服务；不会删除数据库或论文文件，也不会关闭其他项目的服务。已由 Ollama 应用独立启动的模型服务不会被脚本关闭。
+
 分别在终端启动服务：
 
 ```bash
 uv run uvicorn services.api.app.main:app --reload --port 8000
-uv run celery -A services.api.app.worker.celery_app worker -l info -Q default
+uv run celery -A services.api.app.worker.celery_app worker -l info -Q default --pool=solo --concurrency=1 -n default@%h
 uv run celery -A services.api.app.worker.celery_app worker -l info -Q parser --pool=solo -n parser@%h
 uv run celery -A services.api.app.worker.celery_app beat -l info
 cd apps/web && npm ci && npm run dev
@@ -43,6 +54,10 @@ cd apps/web && npm ci && npm run dev
 科研问答使用持久化会话：可新建、删除并在刷新后继续追问。标准 ReAct 循环保存 assistant tool calls 和对应结果；模型可并行调用 `search_bm25`、`search_semantic`，用 `read` 按 Block Index 阅读原文，或用启用 Thinking 的 `plan` 获取检索策略。Elasticsearch 持久化 BM25 倒排索引，Qdrant 持久化向量索引，两者直接返回命中片段；PDF 解析完成时建立索引。界面在答案前显示可折叠的工具过程，每次新增证据也可展开查看；最终引用按当前答案重新编号为 `[1]`、`[2]`，点击来源卡片可回到 PDF 原文。升级后先启动 Elasticsearch，设置 `ELASTICSEARCH_URL`，运行 `uv run alembic upgrade head` 和 `uv run python scripts/reindex_retrieval.py` 为已有论文重建索引。
 
 研究主题追踪由 Celery Beat 定期检查各订阅的默认 7 天自动刷新周期；新增订阅会立即排入默认 Worker。订阅可暂停、恢复或手动刷新。检索近 30 天的 OpenAlex 和 arXiv 论文，结果存入独立的 `paper_candidates`，不会自动进入个人 `papers` 文献库。摘要经小批量 LLM 评分，引用量和 GitHub Stars 只取实际可验证的数据；缺失的客观指标在评分时重新分配权重。推荐页展示摘要、理由和评分明细，支持主题、状态、分页及反馈。只有用户点击“入库”才创建正式文献并尝试下载解析 PDF。LLM 暂不可用时总分显示“待评分”，客观指标仍可查看；后续刷新会重试尚未评分的推荐和缺失的外部指标。OpenAlex 或 arXiv 其中一方失败时不推进增量检索时间。
+
+引用图谱有两种方式：“库内关系分析”选择至少 2 篇已入库论文，只核验并显示它们之间的引用边，按内部入度和 PageRank 展示这批论文中的基石候选与边缘衍生论文；这是所选集合内的相对位置，不能当作整个领域的绝对排名。缺少学术标识或查询失败时会标明核验覆盖率。“扩展引用探索”可用一篇或多篇库内论文、或 DOI / arXiv / OpenAlex ID 作为种子，异步获取其参考文献与后续引用论文。外部节点只存入图谱，点击“加入文献库”才创建个人文献记录。探索模式下点击节点查看元数据，分别查找它引用的论文或引用它的论文；重新查询入口放在“数据维护”中。图谱、引用边及分页状态持久化。OpenAlex 为主数据源，Semantic Scholar 为备用；可选配置 `SEMANTIC_SCHOLAR_API_KEY`。升级已有数据库后，运行 `uv run python -m scripts.backfill_citation_works` 为旧论文补建统一身份关联；脚本可重复运行。
+
+选中已保存的图谱后，可删除该图谱（不会删除文献库中的论文），或生成基于图内论文的自动综述与未来工作探索。综述按内部 PageRank、入度及全局引用量挑选最多 20 篇论文，结合摘要和 Related Work 一次调用 LLM；上下文较长时缩减为 10 篇。未来工作探索结合已有综述和论文的局限性、展望等原文提出候选方向，再用 OpenAlex 检索；候选方向即使存在高度相近的研究也会展示，并附上相近论文、链接和核查状态。相近程度会结合检索论文的标题与摘要初筛，仍需核对全文；检索未发现重复也不保证想法绝对新颖。两类结果随图谱保存，图谱更新后需重新生成。
 
 ### 本地模型与云端 API 切换
 

@@ -7,10 +7,12 @@ export default function PaperPicker({
   selected,
   onChange,
   searchable = false,
+  bulkSelect = false,
 }: {
   selected: string[];
   onChange: (ids: string[]) => void;
   searchable?: boolean;
+  bulkSelect?: boolean;
 }) {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [query, setQuery] = useState("");
@@ -22,11 +24,40 @@ export default function PaperPicker({
   const filtered = papers.filter((paper) =>
     paper.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
   );
+  const visibleIds = filtered.map((paper) => paper.id);
+  const allVisibleSelected =
+    visibleIds.length > 0 && visibleIds.every((id) => selected.includes(id));
   return (
     <div className="panel">
       <div className="paper-picker-heading">
         <h3>选择文献</h3>
-        {searchable && <span>{selected.length} 篇已选</span>}
+        {(searchable || bulkSelect) && (
+          <div className="paper-picker-actions">
+            <span>{selected.length} 篇已选</span>
+            {bulkSelect && (
+              <button
+                type="button"
+                className="paper-picker-select-all"
+                disabled={!visibleIds.length}
+                onClick={() =>
+                  onChange(
+                    allVisibleSelected
+                      ? selected.filter((id) => !visibleIds.includes(id))
+                      : [...new Set([...selected, ...visibleIds])],
+                  )
+                }
+              >
+                {allVisibleSelected
+                  ? query.trim()
+                    ? "取消选中搜索结果"
+                    : "取消全选"
+                  : query.trim()
+                    ? "全选搜索结果"
+                    : "全选"}
+              </button>
+            )}
+          </div>
+        )}
       </div>
       {searchable && (
         <label className="paper-picker-search">

@@ -96,6 +96,10 @@ export default function Debug() {
     overview?.broker.workers.filter((worker) =>
       worker.queues.includes("parser"),
     ) || [];
+  const parserRunning =
+    overview?.tasks.some(
+      (task) => task.type === "parse_pdf" && task.status === "running",
+    ) || false;
   return (
     <>
       <div className="workspace-hero compact-actions">
@@ -146,10 +150,14 @@ export default function Debug() {
           <strong>
             {parserWorkers.length
               ? `${parserWorkers.length} 个在线`
-              : "未检测到"}
+              : parserRunning
+                ? "正在解析"
+                : "未检测到"}
           </strong>
           <small>
-            parser 队列 {overview?.broker.parser_queue ?? "—"} 个待处理
+            {parserRunning && !parserWorkers.length
+              ? "Worker 忙于解析，在线状态暂不可查询"
+              : `parser 队列 ${overview?.broker.parser_queue ?? "—"} 个待处理`}
           </small>
         </div>
         <div className="panel debug-stat">
@@ -173,7 +181,7 @@ export default function Debug() {
           <small>保留最近 3000 条</small>
         </div>
       </div>
-      {!parserWorkers.length && overview?.broker.available && (
+      {!parserWorkers.length && !parserRunning && overview?.broker.available && (
         <div className="error">
           parser 队列没有在线 Worker。新上传 PDF
           的目录会持续处于等待状态。请启动解析 Worker。

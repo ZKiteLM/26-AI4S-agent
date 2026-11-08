@@ -9,9 +9,14 @@ from celery import Celery
 from sqlalchemy import and_, delete, or_, select, update
 
 from .chat_agent import number_citations, run_react
+from .citation_graph_service import expand_view
+from .citation_identity import normalize_identifier, upsert_work
+from .citation_providers import resolve_paper
 from .config import settings
 from .db import SessionLocal
 from .discovery import search_arxiv, search_external
+from .graph_insights import generate_future, generate_review, save_insight
+from .internal_citation_graph import build_internal_graph
 from .models import (
     AgentRun,
     BackgroundTask,
@@ -19,6 +24,8 @@ from .models import (
     ChatMessage,
     ChatSession,
     Chunk,
+    GraphView,
+    GraphViewNode,
     Paper,
     PaperCandidate,
     Recommendation,
@@ -161,6 +168,7 @@ def run_agent(run_id: str) -> None:
         run.status = "running"
         db.commit()
     try:
+
         def emit(name: str, data: dict) -> None:
             with SessionLocal() as session_db:
                 event(session_db, run_id, name, data)
@@ -195,6 +203,148 @@ def run_agent(run_id: str) -> None:
             db.commit()
             event(db, run_id, "failed", {"error": run.error})
             record("worker", "ERROR", "科研任务失败", run_id=run_id, error=run.error)
+
+
+@celery_app.task(name="research.build_citation_graph")
+def build_citation_graph(task_id: str, graph_id: str) -> None:
+    with SessionLocal() as db:
+        task = db.get(BackgroundTask, task_id)
+        view = db.get(GraphView, graph_id)
+        if not task or not view:
+            return
+        task.status = view.status = "running"
+        db.commit()
+        errors = []
+        try:
+            if view.config.get("mode") == "internal":
+                errors = build_internal_graph(
+                    db, view, lambda value: _citation_progress(db, task, value)
+                )
+                view.version += 1
+                view.status = task.status = "partial" if errors else "completed"
+                view.error = "; ".join(errors)[:1000] if errors else None
+                task.progress = 1
+                task.result = {"graph_id": graph_id, "version": view.version, "errors": errors}
+                db.commit()
+                return
+            for seed in view.config.get("external_seeds", []):
+                namespace = seed["type"]
+                field = {"doi": "doi", "arxiv": "arxiv_id", "openalex": "openalex_id"}[namespace]
+                metadata = {field: normalize_identifier(namespace, seed["value"])}
+                found = resolve_paper(metadata)
+                if not found:
+                    errors.append(f"Could not resolve external {namespace} seed")
+                    continue
+                data, provider = found
+                work = upsert_work(db, data, provider)
+                if not db.scalar(
+                    select(GraphViewNode).where(
+                        GraphViewNode.graph_id == graph_id,
+                        GraphViewNode.work_id == work.id,
+                    )
+                ):
+                    db.add(GraphViewNode(graph_id=graph_id, work_id=work.id, is_seed=True))
+                db.commit()
+            seeds = db.scalars(
+                select(GraphViewNode).where(
+                    GraphViewNode.graph_id == graph_id,
+                    GraphViewNode.is_seed.is_(True),
+                )
+            ).all()
+            if not seeds:
+                raise ValueError("No seed could be resolved")
+            partial = False
+            for index, seed in enumerate(seeds):
+                result = expand_view(
+                    db,
+                    graph_id,
+                    seed.work_id,
+                    view.config["direction"],
+                    view.config["per_direction_limit"],
+                )
+                for item in result.get("expansion", {}).get("directions", {}).values():
+                    if item.get("error"):
+                        errors.append(item["error"])
+                    if item.get("status") != "complete" or item.get("has_more"):
+                        partial = True
+                task.progress = (index + 1) / len(seeds)
+                db.commit()
+            view.status = "partial" if errors or partial else "completed"
+            task.status = view.status
+            task.progress = 1
+            task.result = {"graph_id": graph_id, "version": view.version, "errors": errors}
+            view.error = "; ".join(errors)[:1000] if errors else None
+        except Exception as exc:
+            db.rollback()
+            task.status = view.status = "failed"
+            task.error = view.error = str(exc)[:1000]
+            logger.exception("Citation graph build failed: %s", graph_id)
+        db.commit()
+
+
+def _citation_progress(db, task, value: float) -> None:
+    task.progress = value
+    db.commit()
+
+
+@celery_app.task(name="research.expand_citation_graph")
+def expand_citation_graph(
+    task_id: str, graph_id: str, work_id: str, direction: str, limit: int, force: bool = False
+) -> None:
+    with SessionLocal() as db:
+        task = db.get(BackgroundTask, task_id)
+        view = db.get(GraphView, graph_id)
+        if not task or not view:
+            return
+        task.status = "running"
+        db.commit()
+        try:
+            result = expand_view(db, graph_id, work_id, direction, limit, force=force)
+            task.result = {
+                "graph_id": graph_id,
+                "version": result["version"],
+                **result["expansion"],
+            }
+            task.status = "partial" if result["status"] == "partial" else "completed"
+            task.progress = 1
+        except Exception as exc:
+            db.rollback()
+            task.status = "failed"
+            task.error = str(exc)[:1000]
+            logger.exception("Citation graph expansion failed: %s", graph_id)
+        db.commit()
+
+
+@celery_app.task(name="research.generate_graph_insight")
+def generate_graph_insight(task_id: str, graph_id: str, kind: str) -> None:
+    with SessionLocal() as db:
+        task = db.get(BackgroundTask, task_id)
+        view = db.get(GraphView, graph_id)
+        if not task or not view or task.status != "queued":
+            return
+        version = view.version
+        task.status = "running"
+        db.commit()
+        try:
+            content, sources = (
+                generate_review(db, view) if kind == "review" else generate_future(db, view)
+            )
+            db.expire_all()
+            view = db.get(GraphView, graph_id)
+            if not view or view.version != version:
+                raise ValueError("图谱已变化，请重新生成")
+            save_insight(db, view, kind, content, sources)
+            task.status = "completed"
+            task.progress = 1
+            task.result = {"graph_id": graph_id, "kind": kind, "paper_count": len(sources)}
+        except Exception as exc:
+            db.rollback()
+            task = db.get(BackgroundTask, task_id)
+            if task:
+                task.status = "failed"
+                task.error = str(exc)[:1000]
+            logger.exception("Graph %s insight failed: %s", kind, graph_id)
+        db.commit()
 
 
 ACTIVE_REFRESH = ("queued", "searching", "scoring")

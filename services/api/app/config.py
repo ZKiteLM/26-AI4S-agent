@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     embedding_model: str = ""
     github_token: str = ""
     openalex_api_key: str = ""
+    semantic_scholar_api_key: str = ""
+    citation_references_ttl_hours: int = Field(default=168, ge=1)
+    citation_citations_ttl_hours: int = Field(default=24, ge=1)
     metrics_refresh_hours: int = Field(default=24, ge=1)
     code_retry_days: int = Field(default=7, ge=1)
     external_error_retry_hours: int = Field(default=1, ge=1)

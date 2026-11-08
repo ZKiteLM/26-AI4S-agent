@@ -35,6 +35,9 @@ class Paper(Base):
     doi: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     arxiv_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     openalex_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    work_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scholarly_works.id"), nullable=True, index=True
+    )
     year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     preferred_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     source: Mapped[str] = mapped_column(String(80), default="upload")
@@ -162,6 +165,110 @@ class CitationEdge(Base):
     cited_paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id"), index=True)
     source: Mapped[str] = mapped_column(String(80))
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+
+
+class ScholarlyWork(Base):
+    __tablename__ = "scholarly_works"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    title: Mapped[str] = mapped_column(Text, default="")
+    authors: Mapped[list] = mapped_column(JSON, default=list)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    abstract: Mapped[str] = mapped_column(Text, default="")
+    doi: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    arxiv_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    openalex_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    s2_paper_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    citation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    citation_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    metadata_source: Mapped[str] = mapped_column(String(40), default="local")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ScholarlyWorkAlias(Base):
+    __tablename__ = "scholarly_work_aliases"
+    __table_args__ = (UniqueConstraint("namespace", "normalized_value"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    work_id: Mapped[str] = mapped_column(ForeignKey("scholarly_works.id"), index=True)
+    namespace: Mapped[str] = mapped_column(String(30))
+    normalized_value: Mapped[str] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ScholarlyAliasConflict(Base):
+    __tablename__ = "scholarly_alias_conflicts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    namespace: Mapped[str] = mapped_column(String(30))
+    normalized_value: Mapped[str] = mapped_column(String(255))
+    existing_work_id: Mapped[str] = mapped_column(String(36))
+    incoming_work_id: Mapped[str] = mapped_column(String(36))
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ScholarlyCitationEdge(Base):
+    __tablename__ = "scholarly_citation_edges"
+    __table_args__ = (UniqueConstraint("citing_work_id", "cited_work_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    citing_work_id: Mapped[str] = mapped_column(ForeignKey("scholarly_works.id"), index=True)
+    cited_work_id: Mapped[str] = mapped_column(ForeignKey("scholarly_works.id"), index=True)
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CitationFetchState(Base):
+    __tablename__ = "citation_fetch_state"
+    __table_args__ = (UniqueConstraint("work_id", "provider", "direction"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    work_id: Mapped[str] = mapped_column(ForeignKey("scholarly_works.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    direction: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="not_fetched")
+    next_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    fetched_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class GraphView(Base):
+    __tablename__ = "graph_views"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class GraphInsight(Base):
+    __tablename__ = "graph_insights"
+    __table_args__ = (UniqueConstraint("graph_id", "kind"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    graph_id: Mapped[str] = mapped_column(ForeignKey("graph_views.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    graph_version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class GraphViewNode(Base):
+    __tablename__ = "graph_view_nodes"
+    __table_args__ = (UniqueConstraint("graph_id", "work_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    graph_id: Mapped[str] = mapped_column(ForeignKey("graph_views.id"), index=True)
+    work_id: Mapped[str] = mapped_column(ForeignKey("scholarly_works.id"), index=True)
+    is_seed: Mapped[bool] = mapped_column(Boolean, default=False)
+    depth: Mapped[int] = mapped_column(Integer, default=0)
+    expanded_references: Mapped[bool] = mapped_column(Boolean, default=False)
+    expanded_citations: Mapped[bool] = mapped_column(Boolean, default=False)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class Artifact(Base):
