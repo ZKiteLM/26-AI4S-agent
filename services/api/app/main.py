@@ -34,12 +34,15 @@ from .models import (
     Chunk,
     CitationEdge,
     GraphInsight,
+    GraphReviewEvidence,
+    GraphReviewRun,
     GraphView,
     GraphViewNode,
     Paper,
     PaperCandidate,
     Recommendation,
     RunEvent,
+    ScholarlyWork,
     Subscription,
     Translation,
     Version,
@@ -1407,6 +1410,64 @@ def get_graph_insights(
     }
 
 
+@app.get(API + "/graphs/{graph_id}/insights/review/research")
+def get_graph_review_research(
+    graph_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    owned_graph(db, graph_id, user)
+    run = db.scalar(
+        select(GraphReviewRun)
+        .where(GraphReviewRun.graph_id == graph_id, GraphReviewRun.owner_id == user)
+        .order_by(GraphReviewRun.created_at.desc())
+    )
+    if not run:
+        return {"run": None}
+    evidence = db.scalars(
+        select(GraphReviewEvidence).where(GraphReviewEvidence.run_id == run.id)
+    ).all()
+    work_titles = {
+        work.id: work.title
+        for work in db.scalars(
+            select(ScholarlyWork).where(
+                ScholarlyWork.id.in_({item.work_id for item in evidence})
+            )
+        )
+    }
+    return {
+        "run": {
+            "id": run.id,
+            "task_id": run.task_id,
+            "status": run.status,
+            "phase": run.phase,
+            "graph_version": run.graph_version,
+            "stale": run.graph_version != db.get(GraphView, graph_id).version,
+            "outline": run.outline,
+            "sections": [
+                {"id": item["id"], "title": item["title"], "status": item["status"]}
+                for item in run.sections
+            ],
+            "evidence_count": len(evidence),
+            "paper_count": len({item.work_id for item in evidence}),
+            "evidence": [
+                {
+                    "id": item.id,
+                    "work_id": item.work_id,
+                    "title": work_titles.get(item.work_id, ""),
+                    "paper_id": item.paper_id,
+                    "source_type": item.source_type,
+                    "page_index": item.page_index,
+                    "start": item.start,
+                    "summary": item.summary,
+                    "quote": item.quote[:650],
+                }
+                for item in evidence
+            ],
+            "coverage": run.coverage,
+            "error": run.error,
+        }
+    }
+
+
 @app.post(API + "/graphs/{graph_id}/insights/{kind}")
 def queue_graph_insight(
     graph_id: str, kind: str, user: str = Depends(current_user), db: Session = Depends(get_db)
@@ -1428,6 +1489,41 @@ def queue_graph_insight(
         args={"graph_id": graph_id, "kind": kind, "version": view.version},
     )
     db.add(task)
+    db.flush()
+    if kind == "review":
+        run = db.scalar(
+            select(GraphReviewRun)
+            .where(GraphReviewRun.graph_id == graph_id, GraphReviewRun.owner_id == user)
+            .order_by(GraphReviewRun.created_at.desc())
+        )
+        if (
+            run
+            and run.status == "failed"
+            and run.graph_version == view.version
+            and run.outline.get("sections")
+            and run.sections
+            and not run.coverage.get("gaps")
+            and (
+                len(run.sections) < len(run.outline["sections"])
+                or not run.error
+                or run.error.startswith(("Server error", "Client error", "Connect", "ReadTimeout", "Local model"))
+            )
+        ):
+            run.task_id = task.id
+            run.status = "queued"
+            run.phase = "writing" if len(run.sections) < len(run.outline["sections"]) else "verifying"
+            run.error = None
+            run.updated_at = now()
+        else:
+            run = GraphReviewRun(
+                graph_id=graph_id,
+                owner_id=user,
+                task_id=task.id,
+                graph_version=view.version,
+            )
+            db.add(run)
+            db.flush()
+        task.args = {**task.args, "review_run_id": run.id}
     db.commit()
     generate_graph_insight.delay(task.id, graph_id, kind)
     return {"task_id": task.id, "status": "queued"}
@@ -1438,6 +1534,9 @@ def delete_graph(graph_id: str, user: str = Depends(current_user), db: Session =
     view = owned_graph(db, graph_id, user, lock=True)
     if active_graph_task(db, graph_id):
         raise HTTPException(409, "Graph has a running task; retry when it finishes")
+    review_ids = select(GraphReviewRun.id).where(GraphReviewRun.graph_id == graph_id)
+    db.execute(delete(GraphReviewEvidence).where(GraphReviewEvidence.run_id.in_(review_ids)))
+    db.execute(delete(GraphReviewRun).where(GraphReviewRun.graph_id == graph_id))
     db.execute(delete(GraphInsight).where(GraphInsight.graph_id == graph_id))
     db.execute(delete(GraphViewNode).where(GraphViewNode.graph_id == graph_id))
     db.delete(view)
@@ -1539,8 +1638,6 @@ def import_graph_node(
     )
     if not node:
         raise HTTPException(404, "Graph node not found")
-    from .models import ScholarlyWork
-
     work = db.get(ScholarlyWork, work_id)
     existing = db.scalar(select(Paper).where(Paper.owner_id == user, Paper.work_id == work_id))
     if existing:

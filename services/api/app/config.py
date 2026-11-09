@@ -25,8 +25,9 @@ class Settings(BaseSettings):
     demo_password: str = "change-me"
     llm_base_url: str = ""
     llm_api_key: str = ""
+    ohmygpt_api_key: str = ""
     llm_model: str = ""
-    llm_provider: Literal["openai", "ollama"] = "openai"
+    llm_provider: Literal["openai", "ollama", "ohmygpt"] = "openai"
     ollama_num_ctx: int = Field(default=16384, ge=4096, le=40960)
     agent_max_rounds: int = Field(default=8, ge=1, le=20)
     embedding_base_url: str = ""
@@ -53,8 +54,8 @@ class Settings(BaseSettings):
     def validate_cloud(self):
         if self.deployment_mode != "cloud":
             return self
-        if self.llm_provider != "openai" or self.parser_backend != "remote":
-            raise ValueError("Cloud mode requires LLM_PROVIDER=openai and PARSER_BACKEND=remote")
+        if self.llm_provider not in ("openai", "ohmygpt") or self.parser_backend != "remote":
+            raise ValueError("Cloud mode requires an external LLM and PARSER_BACKEND=remote")
         for name in ("llm_base_url", "embedding_base_url", "mineru_api_url"):
             value = getattr(self, name)
             parsed = urlparse(value)

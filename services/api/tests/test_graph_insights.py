@@ -8,10 +8,16 @@ from sqlalchemy.pool import StaticPool
 
 from services.api.app import graph_insights as insights
 from services.api.app.db import Base
-from services.api.app.main import delete_graph, get_graph_insights, queue_graph_insight
+from services.api.app.main import (
+    delete_graph,
+    get_graph_insights,
+    get_graph_review_research,
+    queue_graph_insight,
+)
 from services.api.app.models import (
     BackgroundTask,
     GraphInsight,
+    GraphReviewRun,
     GraphView,
     GraphViewNode,
     Paper,
@@ -26,37 +32,6 @@ def database():
     )
     Base.metadata.create_all(engine)
     return Session(engine)
-
-
-def test_review_uses_graph_ranking_and_one_llm_call(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        insights,
-        "generate",
-        lambda system, prompt, **kwargs: calls.append((system, prompt, kwargs)) or "综述结论 [1]。",
-    )
-    with database() as db:
-        view = GraphView(owner_id="owner", config={"mode": "internal"})
-        db.add(view)
-        db.flush()
-        for index in range(21):
-            work = ScholarlyWork(
-                title=f"Paper {index:02d}",
-                abstract="research context " * 80,
-                openalex_id=f"W{index + 1}",
-                citation_count=index,
-            )
-            db.add(work)
-            db.flush()
-            db.add(GraphViewNode(graph_id=view.id, work_id=work.id, is_seed=True))
-        db.commit()
-        answer, sources = insights.generate_review(db, view)
-        assert answer == "综述结论 [1]。"
-        assert len(calls) == 1
-        assert len(sources) == 10  # 20 papers would exceed the configured context budget.
-        assert sources[0]["title"] == "Paper 20"
-        assert "[10]" in calls[0][1]
-        assert "[11]" not in calls[0][1]
 
 
 def test_future_shows_ideas_and_related_work_with_review_status(monkeypatch):
@@ -298,6 +273,11 @@ def test_insight_task_is_deduplicated_and_blocks_deletion_while_running(monkeypa
         db.add(GraphViewNode(graph_id=view.id, work_id=work.id))
         db.commit()
         first = queue_graph_insight(view.id, "review", "owner", db)
+        progress = get_graph_review_research(view.id, "owner", db)["run"]
+        assert progress["task_id"] == first["task_id"]
+        assert progress["phase"] == "planning"
+        with pytest.raises(HTTPException):
+            get_graph_review_research(view.id, "someone_else", db)
         again = queue_graph_insight(view.id, "review", "owner", db)
         assert first["task_id"] == again["task_id"]
         with pytest.raises(HTTPException) as active:
@@ -306,3 +286,30 @@ def test_insight_task_is_deduplicated_and_blocks_deletion_while_running(monkeypa
         db.get(BackgroundTask, first["task_id"]).status = "completed"
         db.commit()
         assert delete_graph(view.id, "owner", db) == {"deleted": True}
+        assert not db.query(GraphReviewRun).filter_by(graph_id=view.id).count()
+
+
+def test_failed_review_with_written_sections_resumes_checkpoint(monkeypatch):
+    monkeypatch.setattr("services.api.app.main.generate_graph_insight.delay", lambda *args: None)
+    with database() as db:
+        work = ScholarlyWork(title="Paper")
+        view = GraphView(owner_id="owner", config={}, status="completed")
+        db.add_all([work, view])
+        db.flush()
+        db.add(GraphViewNode(graph_id=view.id, work_id=work.id))
+        db.commit()
+        first = queue_graph_insight(view.id, "review", "owner", db)
+        run = db.scalar(select(GraphReviewRun).where(GraphReviewRun.graph_id == view.id))
+        run.outline = {"sections": [{"id": "a", "title": "背景", "evidence_ids": []}]}
+        run.sections = [{"id": "a", "title": "背景", "markdown": "正文", "status": "written"}]
+        run.coverage = {"gaps": []}
+        run.status = "failed"
+        db.get(BackgroundTask, first["task_id"]).status = "failed"
+        db.commit()
+
+        second = queue_graph_insight(view.id, "review", "owner", db)
+        db.refresh(run)
+        assert second["task_id"] != first["task_id"]
+        assert run.task_id == second["task_id"]
+        assert run.status == "queued" and run.phase == "verifying"
+        assert db.query(GraphReviewRun).filter_by(graph_id=view.id).count() == 1

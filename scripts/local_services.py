@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,9 +216,17 @@ def stop_process(name: str) -> None:
 
 
 def ollama_needed() -> bool:
-    for line in (ROOT / ".env").read_text().splitlines():
-        if line.strip().startswith("LLM_PROVIDER="):
-            return line.split("=", 1)[1].strip().strip("\"'") == "ollama"
+    values = dict(
+        line.split("=", 1)
+        for line in (ROOT / ".env").read_text().splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    )
+    if values.get("LLM_PROVIDER", "").strip().strip("\"'") == "ollama":
+        return True
+    for name in ("LLM_BASE_URL", "EMBEDDING_BASE_URL", "RERANK_BASE_URL"):
+        parsed = urlparse(values.get(name, "").strip().strip("\"'"))
+        if parsed.hostname in ("localhost", "127.0.0.1", "host.docker.internal") and parsed.port == 11434:
+            return True
     return False
 
 

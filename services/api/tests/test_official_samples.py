@@ -774,6 +774,52 @@ def test_local_llm_adapter_is_configured_without_cloud_dependency(monkeypatch):
     assert calls[0][1]["json"]["think"] is False
 
 
+def test_ollama_json_retries_without_unsupported_structured_output(monkeypatch):
+    from services.api.app import ai
+
+    monkeypatch.setattr(
+        ai,
+        "settings",
+        lambda: type(
+            "Config",
+            (),
+            {
+                "llm_base_url": "http://localhost:11434/v1",
+                "llm_model": "local-model",
+                "llm_provider": "ollama",
+                "ollama_num_ctx": 8192,
+            },
+        )(),
+    )
+    payloads = []
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.text = (
+                '{"error":"structured output is unavailable"}'
+                if status_code == 501
+                else '{"message":{"content":"{\\"ok\\": true}"}}'
+            )
+
+        def raise_for_status(self):
+            assert self.status_code == 200
+
+        def json(self):
+            return json.loads(self.text)
+
+    def post(_url, **kwargs):
+        payloads.append(kwargs["json"])
+        return Response(501 if kwargs["json"].get("format") == "json" else 200)
+
+    monkeypatch.setattr(ai.httpx, "post", post)
+    assert json.loads(ai.generate("Return JSON", "Ready?", json_mode=True)) == {"ok": True}
+    assert payloads[0]["format"] == "json"
+    assert "format" not in payloads[1]
+    assert "valid JSON object" in payloads[1]["messages"][0]["content"]
+    assert json.loads(ai.chat_with_tools([{"role": "user", "content": "Ready?"}], [], json_mode=True)["content"]) == {"ok": True}
+
+
 def test_cloud_mode_rejects_local_model_endpoints():
     from services.api.app.config import Settings
 

@@ -15,7 +15,8 @@ from .citation_providers import resolve_paper
 from .config import settings
 from .db import SessionLocal
 from .discovery import search_arxiv, search_external
-from .graph_insights import generate_future, generate_review, save_insight
+from .graph_insights import generate_future, save_insight
+from .graph_review import generate_review
 from .internal_citation_graph import build_internal_graph
 from .models import (
     AgentRun,
@@ -24,6 +25,7 @@ from .models import (
     ChatMessage,
     ChatSession,
     Chunk,
+    GraphReviewRun,
     GraphView,
     GraphViewNode,
     Paper,
@@ -326,8 +328,17 @@ def generate_graph_insight(task_id: str, graph_id: str, kind: str) -> None:
         task.status = "running"
         db.commit()
         try:
+            review_run = (
+                db.get(GraphReviewRun, task.args.get("review_run_id")) if kind == "review" else None
+            )
+            if kind == "review" and not review_run:
+                raise ValueError("综述研究任务不存在")
+            if review_run and review_run.graph_version != view.version:
+                raise ValueError("图谱已变化，请重新生成")
             content, sources = (
-                generate_review(db, view) if kind == "review" else generate_future(db, view)
+                generate_review(db, view, review_run, task)
+                if kind == "review"
+                else generate_future(db, view)
             )
             db.expire_all()
             view = db.get(GraphView, graph_id)
@@ -336,13 +347,28 @@ def generate_graph_insight(task_id: str, graph_id: str, kind: str) -> None:
             save_insight(db, view, kind, content, sources)
             task.status = "completed"
             task.progress = 1
-            task.result = {"graph_id": graph_id, "kind": kind, "paper_count": len(sources)}
+            task.result = {
+                "graph_id": graph_id,
+                "kind": kind,
+                "paper_count": len(sources),
+                **({"review_run_id": review_run.id, "phase": "completed"} if review_run else {}),
+            }
+            if review_run:
+                review_run.status = "completed"
+                review_run.phase = "completed"
+                review_run.updated_at = now()
         except Exception as exc:
             db.rollback()
             task = db.get(BackgroundTask, task_id)
             if task:
                 task.status = "failed"
                 task.error = str(exc)[:1000]
+                review_run = db.get(GraphReviewRun, task.args.get("review_run_id"))
+                if review_run:
+                    review_run.status = "failed"
+                    review_run.phase = "failed"
+                    review_run.error = task.error
+                    review_run.updated_at = now()
             logger.exception("Graph %s insight failed: %s", kind, graph_id)
         db.commit()
 

@@ -13,6 +13,11 @@ import FutureIdeaCards from "@/components/FutureIdeaCards";
 
 type Direction = "both" | "references" | "citations";
 type Mode = "internal" | "explore";
+const externalIdExamples = {
+  doi: "例如：10.1038/nature12373（可选）",
+  arxiv: "例如：1706.03762（可选）",
+  openalex: "例如：W2741809807（可选）",
+};
 type GraphSummary = {
   id: string;
   status: string;
@@ -20,7 +25,38 @@ type GraphSummary = {
   node_count: number;
   mode: Mode;
 };
-type Task = { status: string; error: string | null };
+type Task = {
+  status: string;
+  error: string | null;
+  result?: { phase?: string };
+};
+type ReviewResearch = {
+  task_id: string;
+  status: string;
+  phase: string;
+  outline: {
+    sections?: {
+      id: string;
+      title: string;
+      description: string;
+      evidence_ids: string[];
+    }[];
+  };
+  sections: { id: string; status: string }[];
+  evidence_count: number;
+  paper_count: number;
+  evidence: {
+    id: string;
+    work_id: string;
+    title: string;
+    source_type: string;
+    page_index: number | null;
+    summary: string;
+    quote: string;
+  }[];
+  coverage: { gaps?: string[] };
+  error: string | null;
+};
 type InsightSource = {
   work_id: string;
   paper_id: string | null;
@@ -74,6 +110,9 @@ export default function GraphPage() {
     null,
   );
   const [insightError, setInsightError] = useState("");
+  const [reviewResearch, setReviewResearch] = useState<ReviewResearch | null>(
+    null,
+  );
   const [notice, setNotice] = useState("");
 
   const loadGraphs = useCallback(() => {
@@ -89,6 +128,20 @@ export default function GraphPage() {
     api<{ review?: Insight; future?: Insight }>(`/graphs/${id}/insights`)
       .then(setInsights)
       .catch((cause) => setInsightError(String(cause)));
+    api<{ run: ReviewResearch | null }>(
+      `/graphs/${id}/insights/review/research`,
+    )
+      .then((response) => {
+        setReviewResearch(response.run);
+        if (
+          response.run &&
+          ["queued", "running"].includes(response.run.status)
+        ) {
+          setInsightTaskId(response.run.task_id);
+          setInsightKind("review");
+        }
+      })
+      .catch(() => setReviewResearch(null));
   }, []);
 
   const loadGraph = useCallback(
@@ -138,6 +191,13 @@ export default function GraphPage() {
     const timer = window.setInterval(async () => {
       try {
         const task = await api<Task>(`/tasks/${insightTaskId}`);
+        if (insightKind === "review") {
+          api<{ run: ReviewResearch | null }>(
+            `/graphs/${graphId}/insights/review/research`,
+          )
+            .then((response) => setReviewResearch(response.run))
+            .catch(() => {});
+        }
         if (["completed", "failed"].includes(task.status)) {
           window.clearInterval(timer);
           setInsightTaskId(null);
@@ -153,7 +213,7 @@ export default function GraphPage() {
       }
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [insightTaskId, graphId, loadInsights]);
+  }, [insightTaskId, graphId, insightKind, loadInsights]);
 
   async function create() {
     setBusy(true);
@@ -338,7 +398,7 @@ export default function GraphPage() {
                 <input
                   value={externalValue}
                   onChange={(event) => setExternalValue(event.target.value)}
-                  placeholder="输入论文标识符（可选）"
+                  placeholder={externalIdExamples[externalType]}
                 />
               </div>
             </label>
@@ -665,8 +725,9 @@ export default function GraphPage() {
             kind="review"
             title="自动综述"
             action="生成综述"
-            description="根据当前图谱排序选取最多 20 篇论文；上下文不足时选 10 篇。汇总摘要和 Related Work，单次调用模型。"
+            description="围绕当前图谱逐步研究、调整大纲，再按章节写作并核验引用。"
             insight={insights.review}
+            research={reviewResearch}
             loading={insightKind === "review"}
             disabled={busy || Boolean(insightTaskId) || !graph.nodes.length}
             onGenerate={() => createInsight("review")}
@@ -693,6 +754,7 @@ function InsightPanel({
   action,
   description,
   insight,
+  research,
   loading,
   disabled,
   onGenerate,
@@ -702,6 +764,7 @@ function InsightPanel({
   action: string;
   description: string;
   insight?: Insight;
+  research?: ReviewResearch | null;
   loading: boolean;
   disabled: boolean;
   onGenerate: () => void;
@@ -724,6 +787,62 @@ function InsightPanel({
       {insight?.stale && (
         <p className="muted">图谱已更新，此结果基于较早版本；可重新生成。</p>
       )}
+      {kind === "review" && research && (
+        <div className="graph-review-research">
+          <p>
+            <strong>研究进度：</strong>
+            {(
+              {
+                planning: "研究论文与规划大纲",
+                writing: "按章节撰写",
+                verifying: "核验引用",
+                completed: "已完成",
+                failed: "未完成",
+              } as Record<string, string>
+            )[research.phase] || research.phase}{" "}
+            · 证据 {research.evidence_count} 条 · 涉及论文{" "}
+            {research.paper_count} 篇
+          </p>
+          {research.error && <p className="error">{research.error}</p>}
+          <details>
+            <summary>研究大纲与证据来源</summary>
+            <ol>
+              {(research.outline.sections || []).map((section) => (
+                <li key={section.id}>
+                  <strong>{section.title}</strong> ·{" "}
+                  {research.sections.some((item) => item.id === section.id)
+                    ? "已撰写"
+                    : "待撰写"}{" "}
+                  · {section.evidence_ids.length} 条证据
+                  <p className="muted">{section.description}</p>
+                </li>
+              ))}
+            </ol>
+            {research.coverage.gaps?.length ? (
+              <p className="muted">
+                待补足：{research.coverage.gaps.join("；")}
+              </p>
+            ) : null}
+            <details>
+              <summary>证据清单 · {research.evidence_count} 条</summary>
+              {research.evidence.map((item) => (
+                <p key={item.id} className="graph-review-evidence">
+                  <strong>
+                    {item.source_type === "abstract"
+                      ? "摘要"
+                      : `PDF 第 ${(item.page_index ?? 0) + 1} 页`}
+                  </strong>{" "}
+                  · {item.title}
+                  <br />
+                  {item.summary}
+                  <br />
+                  <small>{item.quote}</small>
+                </p>
+              ))}
+            </details>
+          </details>
+        </div>
+      )}
       {insight && (
         <>
           <div className="citation-insight-body">
@@ -735,7 +854,8 @@ function InsightPanel({
           </div>
           <details className="citation-insight-sources">
             <summary>
-              使用的论文 · {insight.sources.length} 篇（按综合评分排序）
+              使用的论文 · {insight.sources.length} 篇（
+              {kind === "review" ? "按首次引用排序" : "按综合评分排序"}）
             </summary>
             <ol>
               {insight.sources.map((source) => {

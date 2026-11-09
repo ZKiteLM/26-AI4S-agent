@@ -160,27 +160,6 @@ def _sources(items: list[dict]) -> list[dict]:
     ]
 
 
-def generate_review(db: Session, view: GraphView) -> tuple[str, list[dict]]:
-    context, chosen = _context(ranked_material(db, view, "review"), "review")
-    if not chosen:
-        raise ValueError("当前图谱没有可用的论文摘要或已解析正文")
-    system = (
-        "你是科研综述作者。仅根据提供的论文摘要和 Related Work 写中文综述；"
-        "梳理研究脉络、方法差异和未解决问题。每个事实性论断都用对应编号 [n] 引用。"
-        "不得把 Related Work 中描述的他人成果误认为该论文贡献；资料缺失时明确说明。"
-        "不要编造论文、实验数据或参考文献。输出 Markdown 正文，不写 Future Work 建议。"
-    )
-    prompt = f"请综述当前引用图谱的以下 {len(chosen)} 篇论文，按编号引用：\n\n{context}"
-    db.commit()
-    answer = generate(system, prompt, max_tokens=2600).strip()
-    if not answer:
-        raise ValueError("模型没有生成综述")
-    cited = {int(number) for number in re.findall(r"\[(\d+)\]", answer)}
-    if not cited or any(number > len(chosen) for number in cited):
-        raise ValueError("综述缺少有效的论文编号引用")
-    return answer, _sources(chosen)
-
-
 def _parsed_json(raw: str) -> dict:
     result = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
     if not isinstance(result, dict):

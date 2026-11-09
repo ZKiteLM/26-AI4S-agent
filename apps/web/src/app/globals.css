@@ -3346,6 +3346,35 @@ body:has(.paper-reader-page),
   justify-content: flex-end;
   margin-bottom: 12px;
 }
+.graph-review-research {
+  margin: 12px 0;
+  padding: 12px 15px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #f8faff;
+  font-size: 12px;
+}
+.graph-review-research p {
+  margin: 5px 0;
+}
+.graph-review-research details {
+  margin-top: 7px;
+}
+.graph-review-research summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+.graph-review-research ol {
+  padding-left: 21px;
+}
+.graph-review-evidence {
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+.graph-review-evidence small {
+  color: var(--muted);
+  white-space: pre-wrap;
+}
 
 /* Writing workspace */
 .copilot-workspace {

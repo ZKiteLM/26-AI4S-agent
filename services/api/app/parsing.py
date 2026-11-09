@@ -390,6 +390,12 @@ def parse_pdf(data: bytes, progress: Callable[[int, int], None] | None = None) -
                 ]
         for page_index in range(start, end):
             for block in page_blocks_by_index.get(page_index, []):
+                # PDF extractors may emit NUL glyphs, which PostgreSQL text fields reject.
+                for field in ("text", "markdown", "latex"):
+                    if block.get(field):
+                        block[field] = block[field].replace("\x00", "")
+                if not block["text"].strip():
+                    continue
                 if block["type"] == "heading":
                     numbered = re.match(r"^\s*(\d+(?:\.\d+)*)\s", block["text"])
                     level = numbered.group(1).count(".") + 1 if numbered else 1

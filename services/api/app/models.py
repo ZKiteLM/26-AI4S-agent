@@ -258,6 +258,42 @@ class GraphInsight(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class GraphReviewRun(Base):
+    __tablename__ = "graph_review_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    graph_id: Mapped[str] = mapped_column(ForeignKey("graph_views.id"), index=True)
+    owner_id: Mapped[str] = mapped_column(String(80), index=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("background_tasks.id"), unique=True)
+    graph_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    phase: Mapped[str] = mapped_column(String(20), default="planning")
+    messages: Mapped[list] = mapped_column(JSON, default=list)
+    outline: Mapped[dict] = mapped_column(JSON, default=dict)
+    sections: Mapped[list] = mapped_column(JSON, default=list)
+    verification: Mapped[list] = mapped_column(JSON, default=list)
+    coverage: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class GraphReviewEvidence(Base):
+    __tablename__ = "graph_review_evidence"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("graph_review_runs.id"), index=True)
+    work_id: Mapped[str] = mapped_column(ForeignKey("scholarly_works.id"), index=True)
+    paper_id: Mapped[str | None] = mapped_column(String(36))
+    version_id: Mapped[str | None] = mapped_column(String(36))
+    block_id: Mapped[str | None] = mapped_column(String(36))
+    source_type: Mapped[str] = mapped_column(String(20))
+    page_index: Mapped[int | None] = mapped_column(Integer)
+    start: Mapped[int | None] = mapped_column(Integer)
+    length: Mapped[int] = mapped_column(Integer, default=1)
+    bbox: Mapped[list] = mapped_column(JSON, default=list)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    quote: Mapped[str] = mapped_column(Text)
+
+
 class GraphViewNode(Base):
     __tablename__ = "graph_view_nodes"
     __table_args__ = (UniqueConstraint("graph_id", "work_id"),)

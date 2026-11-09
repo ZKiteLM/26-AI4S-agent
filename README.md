@@ -65,11 +65,13 @@ LLM、Embedding 和扫描件 OCR 有独立配置。开发机可运行 Ollama 等
 
 ```bash
 ollama serve
-ollama pull qwen3:8b
+ollama pull qwen3.5:9b
 ollama pull bge-m3
 ```
 
-在 `.env` 中设置 `LLM_PROVIDER=ollama`、`LLM_BASE_URL=http://localhost:11434/v1`、`LLM_MODEL=qwen3:8b`、`OLLAMA_NUM_CTX=16384`、`EMBEDDING_BASE_URL=http://localhost:11434/v1`、`EMBEDDING_MODEL=bge-m3`。16K 是应用请求的上下文窗口，低于该模型提供的 40K 上限；可根据实际内存与延迟调整。Ollama 适配器使用原生工具调用；主 Agent 关闭 Thinking，`plan` 工具单独启用 Thinking；云端设 `LLM_PROVIDER=openai` 并填外部兼容 API 地址。本机 API 直接运行时使用 `localhost`；API 容器访问宿主机模型时使用 `host.docker.internal`。问答检索使用 Elasticsearch BM25 与 Qdrant 向量索引，由 Agent 自主选择工具。
+在 `.env` 中设置 `LLM_PROVIDER=ollama`、`LLM_BASE_URL=http://localhost:11434/v1`、`LLM_MODEL=qwen3.5:9b`、`OLLAMA_NUM_CTX=16384`、`EMBEDDING_BASE_URL=http://localhost:11434/v1`、`EMBEDDING_MODEL=bge-m3`。16K 是应用请求的上下文窗口；可根据实际内存与延迟调整。Ollama 适配器使用原生工具调用；主 Agent 关闭 Thinking，`plan` 工具单独启用 Thinking；云端设 `LLM_PROVIDER=openai` 并填外部兼容 API 地址。本机 API 直接运行时使用 `localhost`；API 容器访问宿主机模型时使用 `host.docker.internal`。问答检索使用 Elasticsearch BM25 与 Qdrant 向量索引，由 Agent 自主选择工具。
+
+使用 OhMyGPT 时，在 `.env` 设置 `LLM_PROVIDER=ohmygpt`、`LLM_BASE_URL=https://api.ohmygpt.com/v1`、`LLM_MODEL=deepseek/deepseek-v4.1-flash-1017` 和 `OHMYGPT_API_KEY`。LLM 请求使用官方 OpenAI SDK 的 Responses API；Embedding 仍可独立使用本机 `bge-m3`。密钥只从环境变量读取。
 
 扫描 PDF 使用本机 MinerU Worker：`uv run mineru-kit models download --tier basic` 后以 `PARSER_BACKEND=local` 运行。默认对 50 页以内的矢量 PDF 也做版式增强，提取公式 LaTeX 和表格；长文档使用分批 PyMuPDF 解析。需要增强长论文公式时可调高 `PARSER_VECTOR_MAX_PAGES`，解析耗时与模型调用量会相应增加。如需快速开发测试，可设 `PARSER_VECTOR_ENHANCE=0`。公网部署时将 `LLM_*`、`EMBEDDING_*`、`RERANK_*` 指向云端服务，并设置 `PARSER_BACKEND=remote`、`MINERU_API_URL`、`MINERU_API_KEY`；业务代码和数据模型无需更改。远程解析适配 MinerU V1 `/v1/file_parse`；所选服务需要支持该接口。[接口说明](https://github.com/opendatalab/MinerU/blob/master/docs/en/usage/http_api.md)
 
