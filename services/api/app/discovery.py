@@ -12,8 +12,16 @@ def openalex_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
-def search_external(query: str, limit: int = 10, from_date: date | None = None) -> list[dict]:
-    params = {"search": query, "per-page": min(limit, 25), "sort": "publication_date:desc"}
+def search_external(
+    query: str,
+    limit: int = 10,
+    from_date: date | None = None,
+    *,
+    sort: str | None = "publication_date:desc",
+) -> list[dict]:
+    params = {"search": query, "per-page": min(limit, 25)}
+    if sort:
+        params["sort"] = sort
     if from_date:
         params["filter"] = f"from_publication_date:{from_date.isoformat()}"
     response = httpx.get(

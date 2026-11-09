@@ -3,6 +3,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +12,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.api.app.charts import render_chart
+from services.api.app.charts import chart_data, inspect_csv, validate_intent
 from services.api.app.db import Base, SessionLocal, engine
 from services.api.app.graphs import build_graph
 from services.api.app.main import app
@@ -506,11 +507,14 @@ def test_reparse_keeps_unchanged_translation_and_previous_blocks_on_failure(monk
 
 
 def test_version_conflict_requires_user_resolution(monkeypatch):
+    from services.api.app.config import settings
+
+    # This test may run against a persistent development database. Isolate its owner.
+    email = f"version-conflict-{uuid4().hex}@example.com"
+    monkeypatch.setattr(settings(), "demo_email", email)
     monkeypatch.setattr("services.api.app.main.parse_version.apply_async", lambda **kwargs: None)
     with TestClient(app) as client:
-        login = client.post(
-            "/api/v1/auth/login", json={"email": "demo@example.com", "password": "change-me"}
-        )
+        login = client.post("/api/v1/auth/login", json={"email": email, "password": "change-me"})
         token = login.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
         assert client.get("/api/v1/papers").status_code == 401
@@ -590,11 +594,13 @@ def test_debug_requires_auth_and_completed_version_can_be_reparsed(monkeypatch):
 
 
 def test_chart_caption_is_computed_from_csv():
-    image, script, caption, spec = render_chart(b"epoch,score\n1,0.3\n2,0.5\n3,0.7\n")
-    assert image.startswith(b"\x89PNG")
+    frame, overview = inspect_csv(b"epoch,score\n1,0.3\n2,0.5\n3,0.7\n")
+    rows, caption, spec = chart_data(
+        frame, validate_intent({"type": "line", "x": "epoch", "y": "score"}, frame)
+    )
     assert "0.3 to 0.7" in caption
-    assert "pd.read_csv" in script
-    assert spec["rows"] == 3
+    assert len(rows) == overview["row_count"] == 3
+    assert spec["y"] == "score"
 
 
 def test_citation_graph_keeps_citing_to_cited_direction(monkeypatch):

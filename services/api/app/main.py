@@ -12,12 +12,15 @@ from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
-from .ai import generate
 from .auth import check_login, current_user, make_token
-from .charts import render_chart
+from .charts import chart_data, choose_chart, inspect_csv
 from .citation_graph_service import add_seed_paper, serialize_view
 from .citation_identity import link_paper_to_work, normalize_identifier
 from .config import settings
+from .copilot_diagram import generate_mermaid
+from .copilot_draft import create_draft
+from .copilot_graph import graph_options, graph_writing_context
+from .copilot_idea import analyze_idea, complete_fields
 from .db import Base, SessionLocal, engine, get_db
 from .discovery import safe_pdf_download, search_arxiv, search_external
 from .graphs import future_work
@@ -168,12 +171,29 @@ class GraphRefreshIn(BaseModel):
 
 
 class DraftIn(BaseModel):
-    idea: str = Field(min_length=10)
+    idea: str = Field(default="", max_length=5000)
+    fields: dict | None = None
+    graph_id: str | None = None
+    idea_index: int | None = Field(default=None, ge=0)
+
+
+class DraftAnalyzeIn(BaseModel):
+    idea: str = Field(min_length=10, max_length=5000)
+
+
+class DraftCompleteIn(DraftAnalyzeIn):
+    fields: dict
 
 
 class DiagramIn(BaseModel):
-    description: str = Field(min_length=5)
-    format: str = "mermaid"
+    description: str = Field(min_length=5, max_length=5000)
+    previous: str = Field(default="", max_length=20000)
+    error: str = Field(default="", max_length=1000)
+
+
+class ChartCaptionIn(BaseModel):
+    data_artifact_id: str
+    spec: dict
 
 
 class SubscriptionIn(BaseModel):
@@ -1548,69 +1568,91 @@ def synthesize(data: ChatIn, user: str = Depends(current_user), db: Session = De
     return {"run_id": run.id, "future_work": future_work(db, data.paper_ids)}
 
 
+@app.get(API + "/copilot/draft/graph-options")
+def draft_graph_options(user: str = Depends(current_user), db: Session = Depends(get_db)):
+    return {"items": graph_options(db, user)}
+
+
+@app.post(API + "/copilot/draft/analyze")
+def draft_analyze(data: DraftAnalyzeIn, _user: str = Depends(current_user)):
+    try:
+        return {"fields": analyze_idea(data.idea)}
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, f"IDEA 分析失败：{exc}") from exc
+
+
+@app.post(API + "/copilot/draft/complete")
+def draft_complete(data: DraftCompleteIn, _user: str = Depends(current_user)):
+    try:
+        return {"fields": complete_fields(data.idea, data.fields)}
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, f"IDEA 补全失败：{exc}") from exc
+
+
 @app.post(API + "/copilot/draft")
-def draft(data: DraftIn, _user: str = Depends(current_user)):
-    references = search_external(data.idea, 8)
-    verified = [x for x in references if x["doi"] or x["arxiv_id"] or x["openalex_id"]]
-    if not verified:
-        raise HTTPException(422, "No verifiable references found")
-    allowed = "\n".join(
-        f"[{i + 1}] {x['title']} ({x['year']}) {x['doi'] or x['openalex_id']}"
-        for i, x in enumerate(verified)
+def draft(data: DraftIn, user: str = Depends(current_user), db: Session = Depends(get_db)):
+    try:
+        if data.graph_id:
+            if data.idea_index is None:
+                raise ValueError("请选择图谱中的 IDEA")
+            context = graph_writing_context(db, user, data.graph_id, data.idea_index)
+            result = create_draft(
+                context["idea"], review=context["review"], seed_candidates=context["candidates"]
+            )
+            if context["stale"]:
+                result["warnings"].append("图谱综述或 IDEA 早于当前图谱版本，建议重新生成图谱分析")
+        else:
+            if len(data.idea.strip()) < 10:
+                raise ValueError("IDEA 至少需要 10 个字符")
+            result = create_draft(data.idea, data.fields)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(422, f"草稿生成失败：{exc}") from exc
+    artifact = Artifact(
+        owner_id=user,
+        type="draft",
+        file_key=f"artifacts/{user}/{secrets.token_hex(12)}.md",
+        metadata_json={
+            "references": result["references"],
+            "candidates": result["candidates"],
+            "warnings": result["warnings"],
+            "fields": result["fields"],
+            "graph_id": data.graph_id,
+            "idea_index": data.idea_index,
+        },
     )
-    body = generate(
-        "Create editable academic draft sections Abstract, Introduction, Related Work. "
-        "Cite only the numbered verified references. Do not write a References section or invent bibliographic fields.",
-        f"Idea: {data.idea}\nVerified references:\n{allowed}",
-        max_tokens=1500,
-    )
-    body = re.split(r"^#{1,3}\s+References\b", body, maxsplit=1, flags=re.I | re.M)[0].rstrip()
-    bibliography = "\n".join(
-        f"[{i + 1}] {', '.join(item['authors'])}. {item['title']} ({item['year']}). "
-        f"{item['doi'] or item['arxiv_id'] or item['openalex_id']}"
-        for i, item in enumerate(verified)
-    )
-    return {"markdown": f"{body}\n\n## References\n\n{bibliography}", "references": verified}
+    Storage().put(artifact.file_key, result["markdown"].encode(), "text/markdown")
+    db.add(artifact)
+    db.commit()
+    return {**result, "artifact_id": artifact.id}
 
 
 @app.post(API + "/copilot/diagrams")
 def diagram(data: DiagramIn, _user: str = Depends(current_user)):
-    if data.format not in ("mermaid", "graphviz", "tikz", "matplotlib"):
-        raise HTTPException(400, "Unsupported diagram format")
-    script = generate(
-        f"Create only valid {data.format} diagram source. No code fence or commentary. "
-        "Do not include executable shell commands.",
-        data.description,
-        max_tokens=700,
-    )
-    if len(script) > 20_000 or not script.strip():
-        raise HTTPException(422, "Invalid diagram output")
-    return {"format": data.format, "script": script}
+    try:
+        return {
+            "format": "mermaid",
+            "script": generate_mermaid(data.description, data.previous, data.error),
+        }
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post(API + "/copilot/charts")
 async def chart(
     file: UploadFile = File(...),
-    chart_type: str = "line",
+    chart_type: str = "auto",
     user: str = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    if chart_type not in ("line", "bar", "scatter", "radar", "3d", "table"):
-        raise HTTPException(400, "Unsupported chart type")
     data = await file.read(5_000_001)
-    if len(data) > 5_000_000:
-        raise HTTPException(400, "CSV too large")
     try:
-        image, script, caption, spec = render_chart(data, chart_type)
+        frame, overview = inspect_csv(data)
+        intent = choose_chart(frame, overview, chart_type)
+        rows, caption, spec = chart_data(frame, intent)
     except (ValueError, UnicodeError) as exc:
         raise HTTPException(422, str(exc)) from exc
-    artifact = Artifact(
-        owner_id=user,
-        type="chart",
-        file_key=f"artifacts/{user}/{secrets.token_hex(12)}.png",
-        metadata_json={"caption": caption, "script": script, "spec": spec},
-    )
-    Storage().put(artifact.file_key, image, "image/png")
     source = Artifact(
         owner_id=user,
         type="csv",
@@ -1618,17 +1660,31 @@ async def chart(
         metadata_json={"filename": file.filename},
     )
     Storage().put(source.file_key, data, "text/csv")
-    db.add_all([artifact, source])
+    db.add(source)
     db.commit()
     return {
         "task_id": None,
-        "artifact_id": artifact.id,
         "caption": caption,
-        "script": script,
         "spec": spec,
-        "image_url": f"{API}/artifacts/{artifact.id}",
+        "overview": overview,
+        "rows": rows,
         "data_artifact_id": source.id,
     }
+
+
+@app.post(API + "/copilot/charts/caption")
+def update_chart_caption(
+    data: ChartCaptionIn, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    source = db.get(Artifact, data.data_artifact_id)
+    if not source or source.owner_id != user or source.type != "csv":
+        raise HTTPException(404, "CSV not found")
+    try:
+        frame, _ = inspect_csv(Storage().get(source.file_key))
+        rows, caption, spec = chart_data(frame, data.spec)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"rows": rows, "caption": caption, "spec": spec}
 
 
 @app.get(API + "/artifacts/{artifact_id}")

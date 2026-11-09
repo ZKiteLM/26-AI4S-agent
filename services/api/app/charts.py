@@ -1,104 +1,157 @@
+"""Safe CSV inspection and chart intent validation for Flint/ECharts."""
+
+import csv
+import json
+import logging
 from io import BytesIO
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import pandas as pd
 
+from .ai import generate
 
-def render_chart(csv_data: bytes, chart_type: str = "line") -> tuple[bytes, str, str, dict]:
-    frame = pd.read_csv(BytesIO(csv_data))
-    if frame.empty or len(frame.columns) < 2:
-        raise ValueError("CSV needs at least two columns and one data row")
-    numeric = frame.select_dtypes(include="number")
-    if numeric.empty and chart_type != "table":
-        raise ValueError("CSV needs a numeric column")
-    if chart_type in ("radar", "3d") and len(numeric.columns) < 3:
-        raise ValueError("Radar and 3D charts need at least three numeric columns")
-    x = frame.columns[0]
-    y = (
-        next((name for name in numeric.columns if name != x), numeric.columns[0])
-        if not numeric.empty
-        else x
-    )
-    if x == y:
-        x = "row"
-    x_values = frame.iloc[:, 0] if x != "row" else frame.index
-    if chart_type == "3d":
-        fig = plt.figure(figsize=(8, 5), layout="constrained")
-        ax = fig.add_subplot(projection="3d")
-        cols = list(numeric.columns[:3])
-        ax.scatter(*[frame[col] for col in cols])
-        ax.set(xlabel=cols[0], ylabel=cols[1], zlabel=cols[2])
-        script = (
-            "import pandas as pd\nimport matplotlib.pyplot as plt\n"
-            "df = pd.read_csv('data.csv')\nfig = plt.figure()\nax = fig.add_subplot(projection='3d')\n"
-            f"ax.scatter(df[{cols[0]!r}], df[{cols[1]!r}], df[{cols[2]!r}])\n"
-            "plt.savefig('chart.png', dpi=180)\n"
-        )
-        caption = f"3D scatter of {', '.join(cols)} across {len(frame)} observations."
-    elif chart_type == "radar":
-        import numpy as np
+CHART_TYPES = {"line", "bar", "scatter", "radar", "table"}
+logger = logging.getLogger(__name__)
 
-        cols = list(numeric.columns)
-        angles = np.linspace(0, 2 * np.pi, len(cols), endpoint=False).tolist()
-        values = [float(frame[col].iloc[0]) for col in cols]
-        fig, ax = plt.subplots(
-            figsize=(7, 6), subplot_kw={"projection": "polar"}, layout="constrained"
+
+def inspect_csv(data: bytes) -> tuple[pd.DataFrame, dict]:
+    if not data or len(data) > 5_000_000:
+        raise ValueError("CSV must be nonempty and at most 5 MB")
+    frame = None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            frame = pd.read_csv(BytesIO(data), encoding=encoding, on_bad_lines="error")
+            break
+        except UnicodeDecodeError:
+            continue
+        except pd.errors.ParserError as exc:
+            raise ValueError("Invalid CSV rows") from exc
+    if frame is None:
+        raise ValueError("Unsupported CSV encoding")
+    header = next(csv.reader(data.decode(encoding).splitlines()), [])
+    if len(header) != len(set(header)) or any(not name.strip() for name in header):
+        raise ValueError("CSV has invalid or duplicate columns")
+    if frame.empty or len(frame.columns) < 2 or len(frame) > 50_000:
+        raise ValueError("CSV needs 1–50,000 rows and at least two columns")
+    if (
+        len(frame.columns) > 80
+        or frame.columns.astype(str).str.startswith("Unnamed:").any()
+        or frame.columns.duplicated().any()
+    ):
+        raise ValueError("CSV has invalid or duplicate columns")
+    if any(not str(c).strip() or len(str(c)) > 100 for c in frame.columns):
+        raise ValueError("CSV has an empty or oversized column name")
+    columns = []
+    for name in frame.columns:
+        series = frame[name]
+        kind = "numeric" if pd.api.types.is_numeric_dtype(series) else "text"
+        columns.append(
+            {
+                "name": str(name),
+                "type": kind,
+                "nulls": int(series.isna().sum()),
+                "examples": [str(x)[:60] for x in series.dropna().head(3)],
+            }
         )
-        ax.plot(angles + angles[:1], values + values[:1], marker="o")
-        ax.fill(angles + angles[:1], values + values[:1], alpha=0.15)
-        ax.set_xticks(angles, cols)
-        script = (
-            "import pandas as pd\nimport numpy as np\nimport matplotlib.pyplot as plt\n"
-            "df = pd.read_csv('data.csv')\n"
-            f"cols = {cols!r}\nangles = np.linspace(0, 2*np.pi, len(cols), endpoint=False).tolist()\n"
-            "values = [float(df[c].iloc[0]) for c in cols]\n"
-            "fig, ax = plt.subplots(subplot_kw={'projection':'polar'})\n"
-            "ax.plot(angles+angles[:1], values+values[:1])\nax.set_xticks(angles, cols)\n"
-            "plt.savefig('chart.png', dpi=180)\n"
+    return frame, {"row_count": len(frame), "columns": columns}
+
+
+def validate_intent(intent: dict, frame: pd.DataFrame) -> dict:
+    kind = intent.get("type")
+    if kind not in CHART_TYPES:
+        raise ValueError("Unsupported chart type")
+    x, y, group = (intent.get(key) for key in ("x", "y", "group"))
+    if x not in frame.columns or (kind != "table" and y not in frame.columns):
+        raise ValueError("Chart field does not exist")
+    if group and group not in frame.columns:
+        raise ValueError("Grouping field does not exist")
+    if kind != "table" and not pd.api.types.is_numeric_dtype(frame[y]):
+        raise ValueError("Y field must be numeric")
+    if kind == "scatter" and not pd.api.types.is_numeric_dtype(frame[x]):
+        raise ValueError("Scatter X field must be numeric")
+    if kind == "radar" and (len(frame) > 30 or frame[x].nunique() > 20):
+        raise ValueError("Radar chart requires at most 30 observations and 20 categories")
+    transform = intent.get("transform", "none")
+    if transform not in ("none", "mean", "sum", "count"):
+        raise ValueError("Unsupported transformation")
+    if transform != "none" and kind in ("scatter", "radar", "table"):
+        raise ValueError("Transformation is incompatible with chart type")
+    return {
+        "type": kind,
+        "x": x,
+        "y": y if kind != "table" else None,
+        "group": group or None,
+        "title": str(intent.get("title") or f"{y} by {x}")[:120],
+        "unit": str(intent.get("unit") or "")[:40],
+        "transform": transform,
+    }
+
+
+def choose_chart(frame: pd.DataFrame, overview: dict, requested: str = "auto") -> dict:
+    numeric = [c["name"] for c in overview["columns"] if c["type"] == "numeric"]
+    if requested not in CHART_TYPES | {"auto"}:
+        raise ValueError("Unsupported chart type")
+    if requested != "table" and not numeric:
+        raise ValueError("CSV needs a numeric column for a chart")
+    schema = {
+        "columns": overview["columns"],
+        "rows": overview["row_count"],
+        "requested_type": requested,
+    }
+    try:
+        raw = generate(
+            "Return JSON with type (line/bar/scatter/radar/table), x, y, group, title, unit, transform (none/mean/sum/count). Use only provided fields. No code. Prefer the requested type if not auto.",
+            json.dumps(schema, ensure_ascii=False),
+            max_tokens=300,
+            json_mode=True,
         )
-        caption = (
-            "Radar profile for the first observation: "
-            + ", ".join(f"{col}={value:g}" for col, value in zip(cols, values, strict=True))
-            + "."
-        )
-    elif chart_type == "table":
-        fig, ax = plt.subplots(figsize=(10, min(9, 1 + len(frame) * 0.35)), layout="constrained")
-        ax.axis("off")
-        ax.table(cellText=frame.head(20).values, colLabels=frame.columns, loc="center")
-        script = (
-            "import pandas as pd\nimport matplotlib.pyplot as plt\n"
-            "df = pd.read_csv('data.csv')\nfig, ax = plt.subplots()\nax.axis('off')\n"
-            "ax.table(cellText=df.head(20).values, colLabels=df.columns, loc='center')\n"
-            "plt.savefig('chart.png', dpi=180)\n"
-        )
-        caption = f"Table of {min(len(frame), 20)} shown rows from {len(frame)} observations."
-    else:
-        fig, ax = plt.subplots(figsize=(8, 5), layout="constrained")
-        if chart_type == "bar":
-            ax.bar(x_values, frame[y])
-        elif chart_type == "scatter":
-            ax.scatter(x_values, frame[y])
+        proposal = json.loads(raw)
+        if requested != "auto":
+            proposal["type"] = requested
+        return validate_intent(proposal, frame)
+    except Exception:
+        logger.exception("Chart intent generation failed; using validated field defaults")
+        x = str(frame.columns[0])
+        y = next((c for c in numeric if c != x), numeric[0] if numeric else None)
+        fallback = {
+            "type": requested if requested != "auto" else ("line" if y else "table"),
+            "x": x,
+            "y": y,
+            "title": f"{y} by {x}" if y else "Data table",
+            "transform": "none",
+        }
+        return validate_intent(fallback, frame)
+
+
+def chart_data(frame: pd.DataFrame, intent: dict) -> tuple[list[dict], str, dict]:
+    spec = validate_intent(intent, frame)
+    x, y, transform = spec["x"], spec["y"], spec["transform"]
+    chart_frame = frame
+    if transform != "none":
+        keys = [x] + ([spec["group"]] if spec["group"] else [])
+        if transform == "count":
+            chart_frame = frame.groupby(keys, dropna=False).size().reset_index(name="count")
+            spec["y"] = y = "count"
         else:
-            ax.plot(x_values, frame[y], marker="o", linewidth=1.8)
-        ax.set_xlabel(x)
-        ax.set_ylabel(y)
-        ax.grid(alpha=0.2)
-        first, last = frame[y].iloc[0], frame[y].iloc[-1]
-        direction = (
-            "increased" if last > first else "decreased" if last < first else "was unchanged"
+            chart_frame = frame.groupby(keys, dropna=False)[y].agg(transform).reset_index()
+    if len(chart_frame) > 5000:
+        raise ValueError("Chart has more than 5,000 plotted rows; aggregate the data first")
+    rows = json.loads(
+        chart_frame.where(pd.notnull(chart_frame), None).to_json(
+            orient="records", date_format="iso"
         )
-        caption = f"{y} {direction} from {first:g} to {last:g} across {len(frame)} observations."
-        x_arg = f"x={x!r}, " if x != "row" else ""
-        script = (
-            "import pandas as pd\nimport matplotlib.pyplot as plt\n"
-            "df = pd.read_csv('data.csv')\n"
-            f"df.plot({x_arg}y={y!r}, kind={chart_type!r})\n"
-            "plt.tight_layout()\nplt.savefig('chart.png', dpi=180)\n"
+    )
+    if spec["type"] == "table":
+        caption = f"Table. {len(frame)} observations and {len(frame.columns)} fields; first {min(len(rows), 50)} rows displayed."
+        rows = rows[:50]
+    else:
+        values = pd.to_numeric(chart_frame[y], errors="coerce").dropna()
+        if values.empty:
+            raise ValueError("Selected metric has no valid values")
+        first, last = float(values.iloc[0]), float(values.iloc[-1])
+        trend = "increased" if last > first else "decreased" if last < first else "was unchanged"
+        caption = (
+            f"Figure. {y} by {x} across {len(values)} valid observations. {y} {trend} from {first:g} to {last:g}; observed range {float(values.min()):g}–{float(values.max()):g}."
+            if spec["type"] == "line"
+            else f"Figure. {y} by {x} across {len(values)} valid observations. Observed {y} range: {float(values.min()):g}–{float(values.max()):g}; mean: {float(values.mean()):g}."
         )
-    image = BytesIO()
-    fig.savefig(image, format="png", dpi=180)
-    plt.close(fig)
-    return image.getvalue(), script, caption, {"rows": len(frame), "x": x, "y": y}
+    return rows, caption, spec

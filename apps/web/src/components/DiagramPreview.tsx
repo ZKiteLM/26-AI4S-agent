@@ -2,14 +2,22 @@
 
 import { useEffect, useState } from "react";
 
-export default function DiagramPreview({ script }: { script: string }) {
-  const [preview, setPreview] = useState({ script: "", image: "", error: "" });
-  const image = preview.script === script ? preview.image : "";
-  const error = preview.script === script ? preview.error : "";
-
+type Preview = { script: string; svg: string; error: string };
+export default function DiagramPreview({
+  script,
+  onError,
+}: {
+  script: string;
+  onError?: (error: string) => void;
+}) {
+  const [preview, setPreview] = useState<Preview>({
+    script: "",
+    svg: "",
+    error: "",
+  });
+  const current = preview.script === script ? preview : null;
   useEffect(() => {
     let cancelled = false;
-    let url = "";
     (async () => {
       try {
         const mermaid = (await import("mermaid")).default;
@@ -23,38 +31,95 @@ export default function DiagramPreview({ script }: { script: string }) {
           `research-diagram-${Date.now()}`,
           script,
         );
-        if (cancelled) return;
-        url = URL.createObjectURL(
-          new Blob([result.svg], { type: "image/svg+xml" }),
-        );
-        setPreview({ script, image: url, error: "" });
+        if (!cancelled) setPreview({ script, svg: result.svg, error: "" });
       } catch (cause) {
-        if (!cancelled)
-          setPreview({
-            script,
-            image: "",
-            error: `图形语法错误：${String(cause)}`,
-          });
+        const error = String(cause);
+        if (!cancelled) {
+          setPreview({ script, svg: "", error });
+          onError?.(error);
+        }
       }
     })();
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
     };
-  }, [script]);
-
+  }, [script, onError]);
+  async function download(kind: "svg" | "png") {
+    if (!current?.svg) return;
+    const source = new Blob([current.svg], {
+      type: "image/svg+xml;charset=utf-8",
+    });
+    let blob = source;
+    if (kind === "png") {
+      const url = URL.createObjectURL(source);
+      try {
+        const image = new Image();
+        image.src = url;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth || 900;
+        canvas.height = image.naturalHeight || 600;
+        const context = canvas.getContext("2d");
+        if (!context) return;
+        context.fillStyle = "white";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, 0, 0);
+        blob = await new Promise<Blob>((resolve, reject) =>
+          canvas.toBlob((x) =>
+            x ? resolve(x) : reject(new Error("PNG export failed")),
+          ),
+        );
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `architecture.${kind}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  const previewUrl = current?.svg
+    ? `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(current.svg)))}`
+    : "";
   return (
-    <>
-      {error && <p className="error">{error}</p>}
-      {image && (
-        // Mermaid produces a local Blob URL, which does not use image optimization.
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={image}
-          alt="Mermaid 架构图预览"
-          style={{ maxWidth: "100%" }}
-        />
+    <div className="stack">
+      {current?.error && <p className="error">图形语法错误：{current.error}</p>}
+      {current?.svg && (
+        <>
+          <div
+            style={{
+              overflow: "auto",
+              background: "white",
+              borderRadius: 12,
+              padding: 18,
+            }}
+          >
+            {/* Mermaid SVG is displayed as an image, outside the document DOM. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={previewUrl}
+              alt="Mermaid 架构图预览"
+              style={{ maxWidth: "100%" }}
+            />
+          </div>
+          <div className="flex">
+            <button
+              className="button secondary"
+              onClick={() => download("svg")}
+            >
+              导出 SVG
+            </button>
+            <button
+              className="button secondary"
+              onClick={() => download("png")}
+            >
+              导出 PNG
+            </button>
+          </div>
+        </>
       )}
-    </>
+    </div>
   );
 }

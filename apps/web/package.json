@@ -12,6 +12,7 @@
   "dependencies": {
     "cytoscape": "^3.30.0",
     "echarts": "^6.0.0",
+    "flint-chart": "^1.0.1",
     "katex": "^0.19.1",
     "lucide-react": "^0.468.0",
     "mermaid": "^12.2.0",
