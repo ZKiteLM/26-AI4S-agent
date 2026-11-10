@@ -7,7 +7,7 @@ from io import BytesIO
 
 import pandas as pd
 
-from .ai import generate
+from ..ai import generate
 
 CHART_TYPES = {"line", "bar", "scatter", "radar", "table"}
 logger = logging.getLogger(__name__)

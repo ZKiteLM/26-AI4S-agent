@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.api.app import graph_insights as insights
+from services.api.app.citation import graph_insights as insights
 from services.api.app.db import Base
 from services.api.app.main import (
     delete_graph,

@@ -52,6 +52,141 @@ button:disabled {
   outline: 3px solid #94b5ff;
   outline-offset: 2px;
 }
+.operation-progress {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--soft);
+}
+.operation-progress-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+.operation-progress-header span,
+.operation-progress p {
+  color: var(--muted);
+  font-size: 12px;
+}
+.operation-progress p {
+  margin: 7px 0 0;
+}
+.operation-progress progress {
+  display: block;
+  width: 100%;
+  height: 8px;
+  margin-top: 10px;
+  accent-color: var(--brand);
+}
+.task-activity,
+.model-settings {
+  max-width: 980px;
+  margin: 0 auto;
+}
+.task-activity-top,
+.task-activity-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.task-activity-top h2,
+.task-activity-top h3 {
+  margin: 0 0 6px;
+}
+.task-activity-top time {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.task-activity-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+.task-activity-card {
+  display: grid;
+  gap: 14px;
+}
+.task-activity-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.task-state {
+  display: inline-block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.task-state-running,
+.task-state-searching,
+.task-state-scoring {
+  color: var(--brand);
+}
+.task-state-completed {
+  color: #16805d;
+}
+.task-state-failed {
+  color: var(--danger);
+}
+.model-settings {
+  display: grid;
+  gap: 20px;
+}
+.model-settings-fields {
+  display: grid;
+  gap: 14px;
+  max-width: 700px;
+}
+.model-settings-fields label {
+  display: grid;
+  gap: 6px;
+  font-weight: 650;
+}
+.model-settings-fields input,
+.model-settings-fields select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 11px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 400;
+}
+.model-settings-fields small {
+  color: var(--muted);
+  font-weight: 400;
+}
+.model-test-reply {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 9px;
+  background: #eaf7f1;
+  color: #126a4c;
+}
+.model-test-reply strong {
+  margin-right: 8px;
+}
+.request-progress-banner {
+  position: fixed;
+  top: 68px;
+  right: 18px;
+  z-index: 70;
+  width: min(390px, calc(100vw - 36px));
+  box-shadow: var(--shadow);
+}
+@media (max-width: 640px) {
+  .task-activity-top {
+    align-items: flex-start;
+  }
+  .task-activity-top time {
+    white-space: normal;
+    text-align: right;
+  }
+}
 h1,
 h2,
 h3,

@@ -9,10 +9,10 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from .ai import generate
-from .config import settings
+from ..ai import generate
+from ..config import settings
+from ..models import PaperCandidate, Recommendation, now
 from .discovery import citation_metrics
-from .models import PaperCandidate, Recommendation, now
 from .resolve_paper_code import resolve_paper_code
 
 logger = logging.getLogger(__name__)

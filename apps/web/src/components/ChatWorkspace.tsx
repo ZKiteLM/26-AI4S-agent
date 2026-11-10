@@ -6,6 +6,7 @@ import { MessageSquarePlus, Search, Trash2, Send } from "lucide-react";
 import { api, Evidence } from "@/lib/api";
 import PaperPicker from "@/components/PaperPicker";
 import MathMarkdown from "@/components/MathMarkdown";
+import OperationProgress from "@/components/OperationProgress";
 
 type RunEvent = {
   event: string;
@@ -132,13 +133,19 @@ function Trace({
                   : "规划检索";
           return (
             <li key={call.sequence}>
-              <strong>第 {round} 步 · {label}</strong>
+              <strong>
+                第 {round} 步 · {label}
+              </strong>
               {isPlan ? (
                 result && (
                   <details className="chat-trace-evidence">
                     <summary>查看检索计划</summary>
                     <p className="chat-trace-plan">
-                      {String(result.data.plan || result.data.error || "规划未返回内容")}
+                      {String(
+                        result.data.plan ||
+                          result.data.error ||
+                          "规划未返回内容",
+                      )}
                     </p>
                   </details>
                 )
@@ -453,6 +460,14 @@ export default function ChatWorkspace({
           {activeRun && (
             <div className="chat-turn assistant">
               <div className="chat-role">科研助手 · 检索中</div>
+              <OperationProgress
+                title={
+                  activeRun.status === "queued"
+                    ? "正在等待科研助手"
+                    : "正在检索与核对论文证据"
+                }
+                detail="助手会按需要多轮检索；工具调用过程显示在下方。"
+              />
               <Trace
                 events={activeRun.events}
                 paperId={paperId}

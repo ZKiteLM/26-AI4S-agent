@@ -3,6 +3,7 @@
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 from sqlalchemy import select
 
@@ -431,7 +432,9 @@ def run_react(run, emit) -> tuple[str, list[dict]]:
                             call,
                             name,
                             args,
-                            executor.submit(_execute, name, args, run, outlines),
+                            executor.submit(
+                                copy_context().run, _execute, name, args, run, outlines
+                            ),
                         )
                     )
                 except (ValueError, TypeError) as exc:

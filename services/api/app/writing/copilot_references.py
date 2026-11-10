@@ -6,9 +6,9 @@ from urllib.parse import quote
 
 import httpx
 
-from .citation_identity import normalize_identifier
-from .citation_providers import OpenAlexProvider, request_json
-from .discovery import search_arxiv
+from ..citation.citation_identity import normalize_identifier
+from ..citation.citation_providers import OpenAlexProvider, request_json
+from ..paper_discovery.discovery import search_arxiv
 
 
 def _same_title(left: str, right: str) -> bool:

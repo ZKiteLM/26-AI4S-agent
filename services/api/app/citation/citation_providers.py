@@ -7,9 +7,9 @@ from typing import Protocol
 
 import httpx
 
+from ..config import settings
+from ..paper_discovery.discovery import openalex_headers
 from .citation_identity import normalize_identifier
-from .config import settings
-from .discovery import openalex_headers
 
 logger = logging.getLogger(__name__)
 

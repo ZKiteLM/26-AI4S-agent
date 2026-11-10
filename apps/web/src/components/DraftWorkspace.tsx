@@ -4,6 +4,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { useSessionState } from "@/lib/useSessionState";
 import { BookOpenText, Network, PenLine } from "lucide-react";
+import OperationProgress from "@/components/OperationProgress";
 
 type Fields = {
   research_problem: string;
@@ -101,6 +102,7 @@ export default function DraftWorkspace() {
     try {
       const result = await api<{ fields: Fields }>("/copilot/draft/analyze", {
         method: "POST",
+        progress: "inline",
         body: JSON.stringify({ idea }),
       });
       setStructured(result.fields);
@@ -122,6 +124,7 @@ export default function DraftWorkspace() {
     try {
       const result = await api<{ fields: Fields }>("/copilot/draft/complete", {
         method: "POST",
+        progress: "inline",
         body: JSON.stringify({ idea, fields: structured }),
       });
       setStructured(result.fields);
@@ -142,6 +145,7 @@ export default function DraftWorkspace() {
           : { idea, fields: structured };
       const result = await api<DraftResult>("/copilot/draft", {
         method: "POST",
+        progress: "inline",
         body: JSON.stringify(payload),
       });
       setResults((previous) => ({ ...previous, [mode]: result }));
@@ -194,6 +198,22 @@ export default function DraftWorkspace() {
         <p className="error" role="alert">
           {error}
         </p>
+      )}
+      {busy && (
+        <OperationProgress
+          title={
+            busy === "generate"
+              ? "正在检索文献并生成论文框架"
+              : busy === "analyze"
+                ? "正在分析研究 IDEA"
+                : "正在补全研究构想"
+          }
+          detail={
+            busy === "generate"
+              ? "会核对候选文献、撰写正文并检查引用，可能需要一些时间。"
+              : "模型正在处理输入，完成后会显示可编辑结果。"
+          }
+        />
       )}
       {mode === "graph" ? (
         <div className="stack copilot-source-body">

@@ -6,7 +6,7 @@ from urllib.parse import unquote
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Paper, ScholarlyAliasConflict, ScholarlyWork, ScholarlyWorkAlias, now
+from ..models import Paper, ScholarlyAliasConflict, ScholarlyWork, ScholarlyWorkAlias, now
 
 FIELDS = {"doi": "doi", "arxiv": "arxiv_id", "openalex": "openalex_id", "s2": "s2_paper_id"}
 

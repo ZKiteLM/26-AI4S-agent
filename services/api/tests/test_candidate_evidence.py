@@ -3,10 +3,10 @@ from datetime import timedelta
 
 import pytest
 
-from services.api.app import discovery
-from services.api.app import resolve_paper_code as code
 from services.api.app.models import PaperCandidate, now
-from services.api.app.recommender import enrich_candidate, weighted_score
+from services.api.app.paper_discovery import discovery
+from services.api.app.paper_discovery import resolve_paper_code as code
+from services.api.app.paper_discovery.recommender import enrich_candidate, weighted_score
 
 
 @pytest.fixture
@@ -153,7 +153,7 @@ def test_citation_matching(monkeypatch, mode):
             return {"results": [work]}
         return {"results": []}
 
-    monkeypatch.setattr("services.api.app.external_http.json_get", fetch)
+    monkeypatch.setattr("services.api.app.paper_discovery.external_http.json_get", fetch)
     kwargs = {
         "openalex": {"openalex_id": "https://openalex.org/W123"},
         "doi": {"doi": "10.1/test"},
@@ -175,7 +175,7 @@ def test_citation_matching(monkeypatch, mode):
 
 def test_false_title_match_is_rejected(monkeypatch):
     monkeypatch.setattr(
-        "services.api.app.external_http.json_get",
+        "services.api.app.paper_discovery.external_http.json_get",
         lambda url, **kw: {
             "results": [
                 {
@@ -212,8 +212,8 @@ def test_cache_and_stars_refresh(monkeypatch, paper):
             "verification": "verified",
         }
 
-    monkeypatch.setattr("services.api.app.recommender.citation_metrics", metrics)
-    monkeypatch.setattr("services.api.app.recommender.resolve_paper_code", resolve)
+    monkeypatch.setattr("services.api.app.paper_discovery.recommender.citation_metrics", metrics)
+    monkeypatch.setattr("services.api.app.paper_discovery.recommender.resolve_paper_code", resolve)
     assert enrich_candidate(paper)
     assert not enrich_candidate(paper)
     assert calls == {"citation": 1, "code": 1}
@@ -226,7 +226,7 @@ def test_cache_and_stars_refresh(monkeypatch, paper):
 def test_http_retry_and_response_limit(monkeypatch):
     import httpx
 
-    from services.api.app import external_http
+    from services.api.app.paper_discovery import external_http
 
     attempts = 0
 
@@ -253,16 +253,17 @@ def test_http_retry_and_response_limit(monkeypatch):
 
 def test_no_code_and_error_cache(monkeypatch, paper):
     monkeypatch.setattr(
-        "services.api.app.recommender.citation_metrics", lambda *a, **kw: {"status": "not_found"}
+        "services.api.app.paper_discovery.recommender.citation_metrics",
+        lambda *a, **kw: {"status": "not_found"},
     )
     monkeypatch.setattr(
-        "services.api.app.recommender.resolve_paper_code",
+        "services.api.app.paper_discovery.recommender.resolve_paper_code",
         lambda **kw: {"status": "error", "repository": None, "stars": None},
     )
     enrich_candidate(paper)
     assert paper.github_url is None and paper.github_stars is None
     assert paper.code_check_status == "error"
-    from services.api.app.recommender import enrichment_due
+    from services.api.app.paper_discovery.recommender import enrichment_due
 
     assert not enrichment_due(paper)
     paper.code_checked_at = now() - timedelta(hours=2)
@@ -274,7 +275,7 @@ def test_existing_recommendation_score_recalculated_without_llm(monkeypatch):
     from sqlalchemy.orm import Session
 
     from services.api.app.models import Base, Recommendation
-    from services.api.app.recommender import refresh_candidate_scores
+    from services.api.app.paper_discovery.recommender import refresh_candidate_scores
 
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -310,7 +311,7 @@ def test_existing_recommendation_score_recalculated_without_llm(monkeypatch):
 
 
 def test_missing_code_remains_unknown(monkeypatch):
-    from services.api.app.external_http import ExternalError
+    from services.api.app.paper_discovery.external_http import ExternalError
 
     monkeypatch.setattr(
         code, "json_get", lambda *_args, **_kwargs: (_ for _ in ()).throw(ExternalError("HTTP 404"))

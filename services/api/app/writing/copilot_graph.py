@@ -5,8 +5,8 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .graph_insights import ranked_material
-from .models import GraphInsight, GraphView
+from ..citation.graph_insights import ranked_material
+from ..models import GraphInsight, GraphView
 
 
 def future_ideas(content: str) -> list[dict]:

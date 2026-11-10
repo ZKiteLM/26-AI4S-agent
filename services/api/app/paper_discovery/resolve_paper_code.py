@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
-from .config import settings
+from ..config import settings
 from .external_http import ExternalError, get, json_get, public_url
 
 logger = logging.getLogger(__name__)

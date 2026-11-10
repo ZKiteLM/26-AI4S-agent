@@ -27,42 +27,69 @@ export function token() {
     : localStorage.getItem("research-token") || "";
 }
 
+function announce(
+  phase: "start" | "end",
+  id: string,
+  path: string,
+  method: string,
+) {
+  if (typeof window !== "undefined" && method !== "GET") {
+    window.dispatchEvent(
+      new CustomEvent("research-request", { detail: { phase, id, path } }),
+    );
+  }
+}
+
 export async function api<T>(
   path: string,
-  options: RequestInit = {},
+  options: RequestInit & { progress?: "global" | "inline" } = {},
 ): Promise<T> {
+  const { progress = "global", ...requestOptions } = options;
+  const method = (requestOptions.method || "GET").toUpperCase();
+  const requestId = `${Date.now()}-${Math.random()}`;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token()}`,
   };
-  if (!(options.body instanceof FormData))
+  if (!(requestOptions.body instanceof FormData))
     headers["Content-Type"] = "application/json";
-  const response = await fetch(`${API}/api/v1${path}`, {
-    ...options,
-    headers: { ...headers, ...options.headers },
-    cache: "no-store",
-  });
-  if (response.status === 401) {
-    if (typeof window !== "undefined") {
-      localStorage.removeItem("research-token");
-      window.location.replace("/login");
+  if (progress === "global") announce("start", requestId, path, method);
+  try {
+    const response = await fetch(`${API}/api/v1${path}`, {
+      ...requestOptions,
+      headers: { ...headers, ...requestOptions.headers },
+      cache: "no-store",
+    });
+    if (response.status === 401) {
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("research-token");
+        window.location.replace("/login");
+      }
+      throw new Error("请先登录");
     }
-    throw new Error("请先登录");
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(
+        typeof detail.detail === "string"
+          ? detail.detail
+          : `请求失败 (${response.status})`,
+      );
+    }
+    return (await response.json()) as T;
+  } finally {
+    if (progress === "global") announce("end", requestId, path, method);
   }
-  if (!response.ok) {
-    const detail = await response.json().catch(() => ({}));
-    throw new Error(
-      typeof detail.detail === "string"
-        ? detail.detail
-        : `请求失败 (${response.status})`,
-    );
-  }
-  return response.json() as Promise<T>;
 }
 
 export async function apiFile(path: string): Promise<Blob> {
-  const response = await fetch(`${API}/api/v1${path}`, {
-    headers: { Authorization: `Bearer ${token()}` },
-  });
-  if (!response.ok) throw new Error(`文件读取失败 (${response.status})`);
-  return response.blob();
+  const requestId = `${Date.now()}-${Math.random()}`;
+  announce("start", requestId, path, "FILE");
+  try {
+    const response = await fetch(`${API}/api/v1${path}`, {
+      headers: { Authorization: `Bearer ${token()}` },
+    });
+    if (!response.ok) throw new Error(`文件读取失败 (${response.status})`);
+    return await response.blob();
+  } finally {
+    announce("end", requestId, path, "FILE");
+  }
 }

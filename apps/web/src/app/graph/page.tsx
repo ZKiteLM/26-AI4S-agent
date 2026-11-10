@@ -10,6 +10,7 @@ import CitationGraph, {
 } from "@/components/CitationGraph";
 import MathMarkdown from "@/components/MathMarkdown";
 import FutureIdeaCards from "@/components/FutureIdeaCards";
+import OperationProgress from "@/components/OperationProgress";
 
 type Direction = "both" | "references" | "citations";
 type Mode = "internal" | "explore";
@@ -28,6 +29,7 @@ type GraphSummary = {
 type Task = {
   status: string;
   error: string | null;
+  progress: number;
   result?: { phase?: string };
 };
 type ReviewResearch = {
@@ -98,6 +100,7 @@ export default function GraphPage() {
   const [graphs, setGraphs] = useState<GraphSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [graphProgress, setGraphProgress] = useState<number | null>(null);
   const [resetLayout, setResetLayout] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -106,6 +109,7 @@ export default function GraphPage() {
     future?: Insight;
   }>({});
   const [insightTaskId, setInsightTaskId] = useState<string | null>(null);
+  const [insightProgress, setInsightProgress] = useState<number | null>(null);
   const [insightKind, setInsightKind] = useState<"review" | "future" | null>(
     null,
   );
@@ -168,10 +172,12 @@ export default function GraphPage() {
     const timer = window.setInterval(async () => {
       try {
         const task = await api<Task>(`/tasks/${taskId}`);
+        setGraphProgress(task.status === "running" ? task.progress : null);
         if (["completed", "partial", "failed"].includes(task.status)) {
           window.clearInterval(timer);
           if (task.error) setError(task.error);
           setTaskId(null);
+          setGraphProgress(null);
           setBusy(false);
           loadGraph(graphId);
           loadGraphs();
@@ -191,6 +197,11 @@ export default function GraphPage() {
     const timer = window.setInterval(async () => {
       try {
         const task = await api<Task>(`/tasks/${insightTaskId}`);
+        setInsightProgress(
+          task.status === "running" && insightKind === "review"
+            ? task.progress
+            : null,
+        );
         if (insightKind === "review") {
           api<{ run: ReviewResearch | null }>(
             `/graphs/${graphId}/insights/review/research`,
@@ -201,6 +212,7 @@ export default function GraphPage() {
         if (["completed", "failed"].includes(task.status)) {
           window.clearInterval(timer);
           setInsightTaskId(null);
+          setInsightProgress(null);
           setInsightKind(null);
           if (task.error) setInsightError(task.error);
           else loadInsights(graphId);
@@ -248,6 +260,7 @@ export default function GraphPage() {
         metrics: {},
       });
       setTaskId(response.task_id);
+      setGraphProgress(null);
       loadGraph(response.graph_id);
       loadGraphs();
     } catch (cause) {
@@ -277,6 +290,7 @@ export default function GraphPage() {
         },
       );
       setTaskId(response.task_id);
+      setGraphProgress(null);
     } catch (cause) {
       setError(String(cause));
       setBusy(false);
@@ -306,9 +320,10 @@ export default function GraphPage() {
     try {
       const response = await api<{ task_id: string }>(
         `/graphs/${graph.graph_id}/insights/${kind}`,
-        { method: "POST" },
+        { method: "POST", progress: "inline" },
       );
       setInsightTaskId(response.task_id);
+      setInsightProgress(null);
     } catch (cause) {
       setInsightError(String(cause));
       setInsightKind(null);
@@ -452,6 +467,13 @@ export default function GraphPage() {
               ? "选择至少 2 篇库内论文；只分析这些论文之间的引用，不加入外部节点。"
               : "至少选一篇库内论文，或输入外部论文标识。外部节点不会自动入库。"}
           </p>
+          {taskId && (
+            <OperationProgress
+              title="正在构建引用图谱"
+              detail="正在核对论文身份、获取引用数据并计算图谱。"
+              progress={graphProgress}
+            />
+          )}
         </div>
       </div>
 
@@ -727,6 +749,7 @@ export default function GraphPage() {
             action="生成综述"
             description="围绕当前图谱逐步研究、调整大纲，再按章节写作并核验引用。"
             insight={insights.review}
+            progress={insightProgress}
             research={reviewResearch}
             loading={insightKind === "review"}
             disabled={busy || Boolean(insightTaskId) || !graph.nodes.length}
@@ -738,6 +761,7 @@ export default function GraphPage() {
             action="探索未来方向"
             description="结合当前图谱的摘要、结论、局限及已有综述生成候选方向，逐项展示相近论文与核查状态。相近不等于方法相同，新颖性仍需核对全文。"
             insight={insights.future}
+            progress={insightProgress}
             loading={insightKind === "future"}
             disabled={busy || Boolean(insightTaskId) || !graph.nodes.length}
             onGenerate={() => createInsight("future")}
@@ -754,6 +778,7 @@ function InsightPanel({
   action,
   description,
   insight,
+  progress,
   research,
   loading,
   disabled,
@@ -764,6 +789,7 @@ function InsightPanel({
   action: string;
   description: string;
   insight?: Insight;
+  progress?: number | null;
   research?: ReviewResearch | null;
   loading: boolean;
   disabled: boolean;
@@ -784,6 +810,17 @@ function InsightPanel({
           {loading ? "生成中…" : insight ? `重新${action}` : action}
         </button>
       </div>
+      {loading && (
+        <OperationProgress
+          title={kind === "review" ? "正在生成自动综述" : "正在探索未来方向"}
+          detail={
+            kind === "review"
+              ? "依次研究论文、撰写章节并核对引用。"
+              : "正在整理未来工作并对照已有研究。"
+          }
+          progress={progress}
+        />
+      )}
       {insight?.stale && (
         <p className="muted">图谱已更新，此结果基于较早版本；可重新生成。</p>
       )}

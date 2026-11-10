@@ -9,15 +9,15 @@ from celery import Celery
 from sqlalchemy import and_, delete, or_, select, update
 
 from .chat_agent import number_citations, run_react
-from .citation_graph_service import expand_view
-from .citation_identity import normalize_identifier, upsert_work
-from .citation_providers import resolve_paper
+from .citation.citation_graph_service import expand_view
+from .citation.citation_identity import normalize_identifier, upsert_work
+from .citation.citation_providers import resolve_paper
+from .citation.graph_insights import generate_future, save_insight
+from .citation.graph_review import generate_review
+from .citation.internal_citation_graph import build_internal_graph
 from .config import settings
 from .db import SessionLocal
-from .discovery import search_arxiv, search_external
-from .graph_insights import generate_future, save_insight
-from .graph_review import generate_review
-from .internal_citation_graph import build_internal_graph
+from .model_config import model_for_user
 from .models import (
     AgentRun,
     BackgroundTask,
@@ -38,8 +38,8 @@ from .models import (
     now,
 )
 from .observability import record
-from .parsing import parse_pdf
-from .recommender import (
+from .paper_discovery.discovery import search_arxiv, search_external
+from .paper_discovery.recommender import (
     enrich_candidate,
     enrichment_due,
     refresh_candidate_scores,
@@ -47,9 +47,10 @@ from .recommender import (
     upsert_candidate,
     upsert_recommendation,
 )
+from .paper_discovery.subscription_keywords import normalize_keywords
+from .parsing import parse_pdf
 from .retrieval import index_chunks, make_chunks, remove_version_index
 from .storage import Storage
-from .subscription_keywords import normalize_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,8 @@ def parse_version(task_id: str, version_id: str) -> None:
             data = Storage().get(version.file_key)
 
             def progress(done: int, total: int) -> None:
-                task.progress = done / total
+                task.progress = 0.8 * done / total
+                task.result = {"phase": "extracting", "pages_done": done, "pages_total": total}
                 db.commit()
                 record("parser", "INFO", "解析页进度", task_id=task_id, done=done, total=total)
 
@@ -127,6 +129,8 @@ def parse_version(task_id: str, version_id: str) -> None:
             new_blocks = [Block(version_id=version_id, **block) for block in parsed]
             db.add_all(new_blocks)
             db.flush()
+            task.progress = 0.86
+            task.result = {"phase": "organizing"}
             restored = 0
             for block in new_blocks:
                 matches = previous.get((block.page_index, block.type, block.markdown or block.text))
@@ -136,6 +140,9 @@ def parse_version(task_id: str, version_id: str) -> None:
                         restored += 1
             db.commit()
             chunks = make_chunks(db, version_id)
+            task.progress = 0.92
+            task.result = {"phase": "indexing"}
+            db.commit()
             paper = db.get(Paper, version.paper_id)
             index_chunks(db, chunks, paper.id, paper.owner_id)
             task.status = version.parse_status = "completed"
@@ -175,7 +182,8 @@ def run_agent(run_id: str) -> None:
             with SessionLocal() as session_db:
                 event(session_db, run_id, name, data)
 
-        draft, evidence = run_react(run, emit)
+        with model_for_user(run.owner_id):
+            draft, evidence = run_react(run, emit)
         answer, cited = number_citations(draft, evidence)
         result = {"answer": answer, "evidence": cited}
         with SessionLocal() as db:
@@ -269,7 +277,7 @@ def build_citation_graph(task_id: str, graph_id: str) -> None:
                         errors.append(item["error"])
                     if item.get("status") != "complete" or item.get("has_more"):
                         partial = True
-                task.progress = (index + 1) / len(seeds)
+                task.progress = 0.95 * (index + 1) / len(seeds)
                 db.commit()
             view.status = "partial" if errors or partial else "completed"
             task.status = view.status
@@ -335,11 +343,12 @@ def generate_graph_insight(task_id: str, graph_id: str, kind: str) -> None:
                 raise ValueError("综述研究任务不存在")
             if review_run and review_run.graph_version != view.version:
                 raise ValueError("图谱已变化，请重新生成")
-            content, sources = (
-                generate_review(db, view, review_run, task)
-                if kind == "review"
-                else generate_future(db, view)
-            )
+            with model_for_user(task.owner_id):
+                content, sources = (
+                    generate_review(db, view, review_run, task)
+                    if kind == "review"
+                    else generate_future(db, view)
+                )
             db.expire_all()
             view = db.get(GraphView, graph_id)
             if not view or view.version != version:
@@ -471,6 +480,7 @@ def _discovered_works(sub: Subscription) -> tuple[list[tuple[dict, list[str]]], 
                 logger.exception("%s search failed for subscription %s", source, sub.id)
                 errors.append(f"{source} / {keyword}: {type(exc).__name__}")
     chosen: dict[str, tuple[dict, list[str]]] = {}
+    # Interleave source/query buckets so one broad term cannot consume the candidate cap.
     for rank in range(8):
         for keyword, works in buckets:
             if rank >= len(works):
@@ -588,7 +598,8 @@ def refresh_subscriptions(subscription_id: str | None = None, token: str | None 
                     needs_analysis.append(candidate)
             analyses = {}
             for index in range(0, len(needs_analysis), 4):
-                analyses.update(score_analyses(sub.topic, needs_analysis[index : index + 4]))
+                with model_for_user(sub.owner_id):
+                    analyses.update(score_analyses(sub.topic, needs_analysis[index : index + 4]))
             if len(analyses) < len(needs_analysis):
                 errors.append("部分论文的 LLM 相关性评分失败")
             for candidate in candidates:

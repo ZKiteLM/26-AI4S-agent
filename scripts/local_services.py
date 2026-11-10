@@ -223,9 +223,12 @@ def ollama_needed() -> bool:
     )
     if values.get("LLM_PROVIDER", "").strip().strip("\"'") == "ollama":
         return True
-    for name in ("LLM_BASE_URL", "EMBEDDING_BASE_URL", "RERANK_BASE_URL"):
+    for name in ("LLM_BASE_URL", "EMBEDDING_BASE_URL"):
         parsed = urlparse(values.get(name, "").strip().strip("\"'"))
-        if parsed.hostname in ("localhost", "127.0.0.1", "host.docker.internal") and parsed.port == 11434:
+        if (
+            parsed.hostname in ("localhost", "127.0.0.1", "host.docker.internal")
+            and parsed.port == 11434
+        ):
             return True
     return False
 

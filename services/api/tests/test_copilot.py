@@ -4,19 +4,23 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.api.app.charts import chart_data, inspect_csv, validate_intent
-from services.api.app.copilot_diagram import generate_mermaid
-from services.api.app.copilot_draft import (
+from services.api.app.db import Base
+from services.api.app.models import GraphInsight, GraphView
+from services.api.app.writing.charts import chart_data, inspect_csv, validate_intent
+from services.api.app.writing.copilot_diagram import generate_mermaid
+from services.api.app.writing.copilot_draft import (
     assemble_draft,
     create_draft,
     discover_references,
     review_claims,
 )
-from services.api.app.copilot_graph import future_ideas, graph_options, graph_writing_context
-from services.api.app.copilot_idea import analyze_idea, complete_fields, normalize_fields
-from services.api.app.copilot_references import verify_reference
-from services.api.app.db import Base
-from services.api.app.models import GraphInsight, GraphView
+from services.api.app.writing.copilot_graph import (
+    future_ideas,
+    graph_options,
+    graph_writing_context,
+)
+from services.api.app.writing.copilot_idea import analyze_idea, complete_fields, normalize_fields
+from services.api.app.writing.copilot_references import verify_reference
 
 
 def test_csv_validation_and_caption():
@@ -65,7 +69,7 @@ def test_reference_numbering_and_invalid_citations():
 
 def test_unsupported_claim_is_not_presented_as_verified(monkeypatch):
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.generate",
+        "services.api.app.writing.copilot_draft.generate",
         lambda *_args, **_kwargs: '{"unsupported_indices":[0]}',
     )
     text = review_claims(
@@ -77,7 +81,7 @@ def test_unsupported_claim_is_not_presented_as_verified(monkeypatch):
 
 def test_failed_claim_review_does_not_certify_citations(monkeypatch):
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.generate",
+        "services.api.app.writing.copilot_draft.generate",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("model unavailable")),
     )
     text = review_claims(
@@ -112,7 +116,7 @@ def test_all_rejected_citations_trigger_grounded_rewrite(monkeypatch):
         "verification": "verified",
     }
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.discover_references",
+        "services.api.app.writing.copilot_draft.discover_references",
         lambda *_args: ([reference], [], [reference]),
     )
     calls = iter(
@@ -127,7 +131,7 @@ def test_all_rejected_citations_trigger_grounded_rewrite(monkeypatch):
         ]
     )
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.generate",
+        "services.api.app.writing.copilot_draft.generate",
         lambda *_args, **_kwargs: next(calls),
     )
     result = create_draft("A sufficiently long visual reasoning IDEA", normalize_fields({}))
@@ -146,7 +150,7 @@ def test_failed_rewrite_lists_only_verified_sources(monkeypatch):
         "verification": "verified",
     }
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.discover_references",
+        "services.api.app.writing.copilot_draft.discover_references",
         lambda *_args: ([reference], [], [reference]),
     )
     calls = 0
@@ -163,7 +167,7 @@ def test_failed_rewrite_lists_only_verified_sources(monkeypatch):
             return '{"unsupported_indices":[0]}'
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr("services.api.app.copilot_draft.generate", model)
+    monkeypatch.setattr("services.api.app.writing.copilot_draft.generate", model)
     result = create_draft("A sufficiently long visual reasoning IDEA", normalize_fields({}))
     assert "Unsupported claim [1]" not in result["markdown"]
     assert "### Verified sources to review" in result["markdown"]
@@ -180,7 +184,8 @@ def test_arxiv_identity_and_missing_doi(monkeypatch):
         "authors": ["A"],
     }
     monkeypatch.setattr(
-        "services.api.app.copilot_references.search_arxiv", lambda identifier, limit: [paper]
+        "services.api.app.writing.copilot_references.search_arxiv",
+        lambda identifier, limit: [paper],
     )
     assert verify_reference(paper)["verification"] == "verified_preprint"
     assert verify_reference({"title": "No ID"})["verification"] == "unverified"
@@ -194,7 +199,7 @@ def test_missing_doi_does_not_become_a_reference(monkeypatch):
     def missing(_url):
         raise httpx.HTTPStatusError("not found", request=response.request, response=response)
 
-    monkeypatch.setattr("services.api.app.copilot_references.request_json", missing)
+    monkeypatch.setattr("services.api.app.writing.copilot_references.request_json", missing)
     result = verify_reference({"title": "Imaginary Work", "doi": "10.1000/missing"})
     assert result["verification"] == "unverified"
     assert "404" in result["failure_reason"]
@@ -202,11 +207,11 @@ def test_missing_doi_does_not_become_a_reference(monkeypatch):
 
 def test_crossref_doi_title_verification(monkeypatch):
     monkeypatch.setattr(
-        "services.api.app.copilot_references.OpenAlexProvider.resolve_paper",
+        "services.api.app.writing.copilot_references.OpenAlexProvider.resolve_paper",
         lambda _self, _metadata: {"doi": "10.1000/real"},
     )
     monkeypatch.setattr(
-        "services.api.app.copilot_references.request_json",
+        "services.api.app.writing.copilot_references.request_json",
         lambda _url: {
             "message": {
                 "DOI": "10.1000/real",
@@ -229,13 +234,13 @@ def test_duplicate_discovery_and_service_error(monkeypatch):
         queries.append(term)
         return [paper]
 
-    monkeypatch.setattr("services.api.app.copilot_draft.search_external", search)
+    monkeypatch.setattr("services.api.app.writing.copilot_draft.search_external", search)
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.search_arxiv",
+        "services.api.app.writing.copilot_draft.search_arxiv",
         lambda term, limit: (_ for _ in ()).throw(RuntimeError("down")),
     )
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.verify_reference",
+        "services.api.app.writing.copilot_draft.verify_reference",
         lambda item: {**item, "verification": "verified", "verification_method": "test"},
     )
     refs, errors, checked = discover_references("a study", ["term1", "term2"])
@@ -245,12 +250,12 @@ def test_duplicate_discovery_and_service_error(monkeypatch):
 
 def test_mermaid_repair_and_rejection(monkeypatch):
     monkeypatch.setattr(
-        "services.api.app.copilot_diagram.generate",
+        "services.api.app.writing.copilot_diagram.generate",
         lambda *args, **kwargs: "```mermaid\nflowchart LR\nA-->B\n```",
     )
     assert "A-->B" in generate_mermaid("A sends data to B", "bad", "parse failure")
     monkeypatch.setattr(
-        "services.api.app.copilot_diagram.generate",
+        "services.api.app.writing.copilot_diagram.generate",
         lambda *args, **kwargs: "flowchart LR\nclick A evil",
     )
     with pytest.raises(ValueError):
@@ -262,7 +267,7 @@ def test_idea_completion_keeps_existing_fields(monkeypatch):
         {"research_problem": "Original problem", "related_work_keywords": ["graph learning"]}
     )
     monkeypatch.setattr(
-        "services.api.app.copilot_idea.generate",
+        "services.api.app.writing.copilot_idea.generate",
         lambda *_args, **_kwargs: (
             '{"research_problem":"Changed","core_motivation":"New motive","solution":"","expected_contribution":"","related_work_keywords":["other"]}'
         ),
@@ -284,7 +289,7 @@ def test_idea_analysis_retries_truncated_json(monkeypatch):
             else '{"research_problem":"A question","related_work_keywords":["graph retrieval"]}'
         )
 
-    monkeypatch.setattr("services.api.app.copilot_idea.generate", model)
+    monkeypatch.setattr("services.api.app.writing.copilot_idea.generate", model)
     result = analyze_idea("A sufficiently long original research idea")
     assert result["research_problem"] == "A question"
     assert limits == [1200, 1800]
@@ -292,14 +297,14 @@ def test_idea_analysis_retries_truncated_json(monkeypatch):
 
 def test_graph_draft_survives_repeated_truncated_analysis(monkeypatch):
     monkeypatch.setattr(
-        "services.api.app.copilot_idea.generate",
+        "services.api.app.writing.copilot_idea.generate",
         lambda *_args, **_kwargs: '{"research_problem":"unfinished',
     )
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.discover_references", lambda *_args: ([], [], [])
+        "services.api.app.writing.copilot_draft.discover_references", lambda *_args: ([], [], [])
     )
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.generate",
+        "services.api.app.writing.copilot_draft.generate",
         lambda *_args, **_kwargs: (
             "## Abstract\nLimited outline.\n\n## Introduction\nText.\n\n## Related Work\nNo verified sources."
         ),
@@ -316,9 +321,11 @@ def test_draft_uses_selected_related_work_keywords(monkeypatch):
         captured["keywords"] = keywords
         return [], [], []
 
-    monkeypatch.setattr("services.api.app.copilot_draft.discover_references", fake_discovery)
     monkeypatch.setattr(
-        "services.api.app.copilot_draft.generate",
+        "services.api.app.writing.copilot_draft.discover_references", fake_discovery
+    )
+    monkeypatch.setattr(
+        "services.api.app.writing.copilot_draft.generate",
         lambda *_args, **_kwargs: (
             "## Abstract\nLimited draft.\n\n## Introduction\nText.\n\n## Related Work\nNo verified sources."
         ),
@@ -363,7 +370,7 @@ def test_graph_idea_selection_and_owner_isolation(monkeypatch):
         )
         db.commit()
         monkeypatch.setattr(
-            "services.api.app.copilot_graph.ranked_material",
+            "services.api.app.writing.copilot_graph.ranked_material",
             lambda *_args: [{"work_id": "work-1", "title": "Paper", "abstract": "An abstract"}],
         )
         assert len(future_ideas("### Idea A\nBody")) == 1

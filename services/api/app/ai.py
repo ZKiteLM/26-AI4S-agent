@@ -5,6 +5,7 @@ import httpx
 from openai import OpenAI
 
 from .config import settings
+from .model_config import effective_settings
 
 
 def _client(base_url: str, api_key: str) -> OpenAI:
@@ -49,10 +50,7 @@ def _responses_input(messages: list[dict]) -> list[dict]:
 
 
 def _responses_tools(tools: list[dict]) -> list[dict]:
-    return [
-        {"type": "function", **tool["function"]}
-        for tool in tools
-    ]
+    return [{"type": "function", **tool["function"]} for tool in tools]
 
 
 def _ollama_chat(base_url: str, payload: dict, timeout: int) -> dict:
@@ -88,8 +86,10 @@ def _ollama_chat(base_url: str, payload: dict, timeout: int) -> dict:
     return response.json()
 
 
-def generate(system: str, prompt: str, max_tokens: int = 1200, json_mode: bool = False) -> str:
-    cfg = settings()
+def generate(
+    system: str, prompt: str, max_tokens: int = 1200, json_mode: bool = False, *, llm_config=None
+) -> str:
+    cfg = llm_config or effective_settings(settings())
     if not cfg.llm_base_url or not cfg.llm_model:
         raise RuntimeError("LLM endpoint is not configured")
     if cfg.llm_provider == "ohmygpt":
@@ -123,7 +123,10 @@ def generate(system: str, prompt: str, max_tokens: int = 1200, json_mode: bool =
         try:
             return _ollama_chat(cfg.llm_base_url, payload, 75)["message"]["content"]
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 400 and "exceeds the available context size" in exc.response.text:
+            if (
+                exc.response.status_code == 400
+                and "exceeds the available context size" in exc.response.text
+            ):
                 raise RuntimeError(
                     f"Local model context is too small (OLLAMA_NUM_CTX={cfg.ollama_num_ctx}). "
                     "Reduce retrieved context or increase OLLAMA_NUM_CTX."
@@ -149,7 +152,7 @@ def chat_with_tools(
     max_tokens: int | None = None,
 ) -> dict:
     """Return one canonical assistant message, preserving native tool calls."""
-    cfg = settings()
+    cfg = effective_settings(settings())
     if not cfg.llm_base_url or not cfg.llm_model:
         raise RuntimeError("LLM endpoint is not configured")
     if cfg.llm_provider == "ohmygpt":

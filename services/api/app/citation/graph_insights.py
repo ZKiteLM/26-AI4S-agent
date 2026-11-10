@@ -8,13 +8,13 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .ai import generate
+from ..ai import generate
+from ..config import settings
+from ..models import Block, GraphInsight, GraphView, Paper, Version, now
+from ..paper_discovery.discovery import openalex_headers
 from .citation_graph_service import serialize_view
 from .citation_providers import _abstract as _openalex_abstract
 from .citation_providers import request_json
-from .config import settings
-from .discovery import openalex_headers
-from .models import Block, GraphInsight, GraphView, Paper, Version, now
 
 RELATED = re.compile(r"related work|prior work|previous work|background", re.I)
 FUTURE = re.compile(

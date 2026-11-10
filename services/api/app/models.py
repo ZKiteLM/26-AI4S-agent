@@ -100,6 +100,16 @@ class BackgroundTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class UserModelConfig(Base):
+    __tablename__ = "user_model_configs"
+    owner_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    base_url: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(255))
+    api_key_ciphertext: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class AgentRun(Base):
     __tablename__ = "agent_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

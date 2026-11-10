@@ -5,14 +5,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.api.app.db import Base
-from services.api.app.graph_review import (
+from services.api.app.citation.graph_review import (
     ReviewResearch,
     _compact_messages,
     _tool_result_json,
     _usable_abstract,
     generate_review,
 )
+from services.api.app.db import Base
 from services.api.app.models import (
     BackgroundTask,
     Block,
@@ -155,7 +155,9 @@ def test_dynamic_outline_checkpoint_and_non_top_coverage(research):
 
 def test_bibliography_is_not_abstract_and_breadth_need_not_be_cited(research):
     service, works, _, _ = research
-    works[20].abstract = (
+    works[
+        20
+    ].abstract = (
         "Alice Smith, Bob Jones, Carol Lee, David Kim. Proceedings of the Example Conference. 2025."
     )
     service.db.commit()
@@ -213,7 +215,7 @@ def test_planner_native_calls_and_checkpointed_messages(monkeypatch, research):
             calls = [_call("finish_research", {}, 5)]
         return {"role": "assistant", "content": "", "tool_calls": calls}
 
-    monkeypatch.setattr("services.api.app.graph_review.chat_with_tools", model)
+    monkeypatch.setattr("services.api.app.citation.graph_review.chat_with_tools", model)
     service.planner()
     assert responses == 3
     assert service.run.coverage["gaps"] == []
@@ -243,7 +245,13 @@ def test_planner_prompts_for_outline_after_sufficient_research(monkeypatch, rese
             return {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [_call("read_graph_abstract", {"work_id": works[[0, 1, 2, 3, 20][len(visited) - 1]].id}, len(visited))],
+                "tool_calls": [
+                    _call(
+                        "read_graph_abstract",
+                        {"work_id": works[[0, 1, 2, 3, 20][len(visited) - 1]].id},
+                        len(visited),
+                    )
+                ],
             }
         ids = list(service.evidence_map())
         if len(visited) == 6:
@@ -251,14 +259,22 @@ def test_planner_prompts_for_outline_after_sufficient_research(monkeypatch, rese
             return {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [_call("update_outline", {"sections": [
-                    {"id": "a", "title": "研究背景", "evidence_ids": ids[:3]},
-                    {"id": "b", "title": "方法分支", "evidence_ids": ids[3:]},
-                ]}, 6)],
+                "tool_calls": [
+                    _call(
+                        "update_outline",
+                        {
+                            "sections": [
+                                {"id": "a", "title": "研究背景", "evidence_ids": ids[:3]},
+                                {"id": "b", "title": "方法分支", "evidence_ids": ids[3:]},
+                            ]
+                        },
+                        6,
+                    )
+                ],
             }
         return {"role": "assistant", "content": "", "tool_calls": [_call("finish_research", {}, 7)]}
 
-    monkeypatch.setattr("services.api.app.graph_review.chat_with_tools", model)
+    monkeypatch.setattr("services.api.app.citation.graph_review.chat_with_tools", model)
     service.planner()
     assert len(visited) == 7
     assert service.run.coverage["gaps"] == []
@@ -314,7 +330,7 @@ def test_writer_sections_evidence_and_stable_final_citations(monkeypatch, resear
             )
         return {"role": "assistant", "content": "", "tool_calls": [tool]}
 
-    monkeypatch.setattr("services.api.app.graph_review.chat_with_tools", model)
+    monkeypatch.setattr("services.api.app.citation.graph_review.chat_with_tools", model)
     service.writer()
     assert calls == 4 and len(service.run.sections) == 2
     assert len(service.run.messages) == 10  # section prompts plus tool-call/result pairs
@@ -367,7 +383,7 @@ def test_verifier_revises_partial_claim_and_rejects_unknown_id(monkeypatch, rese
         ]
     )
     monkeypatch.setattr(
-        "services.api.app.graph_review.generate", lambda *args, **kwargs: next(replies)
+        "services.api.app.citation.graph_review.generate", lambda *args, **kwargs: next(replies)
     )
     service.verify()
     assert "夸大" not in service.run.sections[0]["markdown"]
@@ -398,7 +414,7 @@ def test_verifier_removes_uncited_fact_when_revision_adds_no_evidence(monkeypatc
         ]
     )
     monkeypatch.setattr(
-        "services.api.app.graph_review.generate", lambda *args, **kwargs: next(replies)
+        "services.api.app.citation.graph_review.generate", lambda *args, **kwargs: next(replies)
     )
     service.verify()
     assert unsupported not in service.run.sections[0]["markdown"]
@@ -429,7 +445,7 @@ def test_verifier_discards_revision_with_unknown_evidence(monkeypatch, research)
         ]
     )
     monkeypatch.setattr(
-        "services.api.app.graph_review.generate", lambda *args, **kwargs: next(replies)
+        "services.api.app.citation.graph_review.generate", lambda *args, **kwargs: next(replies)
     )
     service.verify()
     assert false_claim not in service.run.sections[0]["markdown"]
@@ -453,7 +469,7 @@ def test_message_trim_keeps_tool_call_with_result():
 def test_planner_budget_failure_preserves_checkpoint(monkeypatch, research):
     service, _, _, _ = research
     monkeypatch.setattr(
-        "services.api.app.graph_review.chat_with_tools",
+        "services.api.app.citation.graph_review.chat_with_tools",
         lambda *_args, **_kwargs: {"role": "assistant", "content": "not done", "tool_calls": []},
     )
     with pytest.raises(RuntimeError, match="预算"):
@@ -494,7 +510,7 @@ def test_planner_accepts_valid_last_outline_without_extra_model_round(monkeypatc
             calls = []
         return {"role": "assistant", "content": "", "tool_calls": calls}
 
-    monkeypatch.setattr("services.api.app.graph_review.chat_with_tools", model)
+    monkeypatch.setattr("services.api.app.citation.graph_review.chat_with_tools", model)
     service.planner()
     assert service.run.coverage["gaps"] == []
 

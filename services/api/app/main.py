@@ -7,26 +7,42 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from fastapi.security import HTTPAuthorizationCredentials
+from openai import AuthenticationError, BadRequestError, NotFoundError, RateLimitError
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
+from .activity import activity_feed
+from .ai import generate
+from .api.common import owned_paper, owned_version, paper_json, task_json, version_json
+from .api.copilot import router as copilot_router
+from .api.schemas import (
+    ChatIn,
+    ChatMessageIn,
+    ChatSessionIn,
+    FeedbackIn,
+    GraphExpandIn,
+    GraphIn,
+    GraphRefreshIn,
+    ImportIn,
+    LoginIn,
+    ModelConfigIn,
+    ResolveIn,
+    SearchIn,
+    SubscriptionIn,
+    SubscriptionUpdateIn,
+    TranslateIn,
+)
 from .auth import check_login, current_user, make_token
-from .charts import chart_data, choose_chart, inspect_csv
-from .citation_graph_service import add_seed_paper, serialize_view
-from .citation_identity import link_paper_to_work, normalize_identifier
+from .citation.citation_graph_service import add_seed_paper, serialize_view
+from .citation.citation_identity import link_paper_to_work, normalize_identifier
+from .citation.graphs import future_work
 from .config import settings
-from .copilot_diagram import generate_mermaid
-from .copilot_draft import create_draft
-from .copilot_graph import graph_options, graph_writing_context
-from .copilot_idea import analyze_idea, complete_fields
 from .db import Base, SessionLocal, engine, get_db
-from .discovery import safe_pdf_download, search_arxiv, search_external
-from .graphs import future_work
+from .model_config import decrypt_key, model_for_user, save_user_config, validate_endpoint
 from .models import (
     AgentRun,
-    Artifact,
     BackgroundTask,
     Block,
     ChatMessage,
@@ -45,17 +61,19 @@ from .models import (
     ScholarlyWork,
     Subscription,
     Translation,
+    UserModelConfig,
     Version,
     now,
 )
 from .observability import client as diagnostic_client
 from .observability import recent as recent_events
 from .observability import record
+from .paper_discovery.discovery import safe_pdf_download, search_arxiv, search_external
+from .paper_discovery.recommender import recompute_recommendation, weighted_score
+from .paper_discovery.subscription_keywords import generate_keywords, normalize_keywords
 from .parsing import identify_pdf, similarity
-from .recommender import recompute_recommendation, weighted_score
 from .retrieval import remove_version_index
 from .storage import Storage
-from .subscription_keywords import generate_keywords, normalize_keywords
 from .translation import translate_blocks, translate_text
 from .worker import (
     build_citation_graph,
@@ -84,13 +102,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 API = "/api/v1"
+app.include_router(copilot_router)
 
 
 @app.middleware("http")
 async def log_request(request: Request, call_next):
     started = time.perf_counter()
+    authorization = request.headers.get("authorization", "")
+    owner = None
+    if authorization.lower().startswith("bearer "):
+        try:
+            owner = current_user(
+                HTTPAuthorizationCredentials(scheme="Bearer", credentials=authorization[7:])
+            )
+        except HTTPException:
+            pass
     try:
-        response = await call_next(request)
+        with model_for_user(owner):
+            response = await call_next(request)
     except Exception as exc:
         record("api", "ERROR", f"{request.method} {request.url.path}", error=type(exc).__name__)
         raise
@@ -113,162 +142,6 @@ def debug_access(_user: str = Depends(current_user), x_debug_key: str = Header(d
         raise HTTPException(403, "Debug console key required")
 
 
-class LoginIn(BaseModel):
-    email: str
-    password: str
-
-
-class ChatIn(BaseModel):
-    question: str = Field(min_length=2)
-    paper_ids: list[str] = Field(min_length=1)
-
-
-class ChatSessionIn(BaseModel):
-    paper_ids: list[str] = Field(default_factory=list)
-
-
-class ChatMessageIn(BaseModel):
-    content: str = Field(min_length=2, max_length=8000)
-    paper_ids: list[str] | None = None
-
-
-class ResolveIn(BaseModel):
-    resolution: str
-
-
-class TranslateIn(BaseModel):
-    version_id: str | None = None
-    block_ids: list[str] = Field(default_factory=list, max_length=100)
-    text: str | None = None
-    target_lang: str = "zh"
-
-
-class SearchIn(BaseModel):
-    query: str = Field(min_length=2)
-    limit: int = Field(default=10, ge=1, le=25)
-
-
-class ImportIn(BaseModel):
-    openalex_id: str | None = None
-    arxiv_id: str | None = None
-
-
-class GraphIn(BaseModel):
-    paper_ids: list[str] = Field(default_factory=list)
-    external_seeds: list[dict[str, str]] = Field(default_factory=list, max_length=5)
-    mode: str = "explore"
-    direction: str = "both"
-    per_direction_limit: int = Field(default=20, ge=1, le=50)
-
-
-class GraphExpandIn(BaseModel):
-    work_id: str
-    direction: str = "both"
-    per_direction_limit: int = Field(default=20, ge=1, le=50)
-
-
-class GraphRefreshIn(BaseModel):
-    work_id: str
-    direction: str = "both"
-    per_direction_limit: int = Field(default=20, ge=1, le=50)
-
-
-class DraftIn(BaseModel):
-    idea: str = Field(default="", max_length=5000)
-    fields: dict | None = None
-    graph_id: str | None = None
-    idea_index: int | None = Field(default=None, ge=0)
-
-
-class DraftAnalyzeIn(BaseModel):
-    idea: str = Field(min_length=10, max_length=5000)
-
-
-class DraftCompleteIn(DraftAnalyzeIn):
-    fields: dict
-
-
-class DiagramIn(BaseModel):
-    description: str = Field(min_length=5, max_length=5000)
-    previous: str = Field(default="", max_length=20000)
-    error: str = Field(default="", max_length=1000)
-
-
-class ChartCaptionIn(BaseModel):
-    data_artifact_id: str
-    spec: dict
-
-
-class SubscriptionIn(BaseModel):
-    topic: str = Field(min_length=2, max_length=255)
-    keywords: list[str] | None = None
-
-
-class SubscriptionUpdateIn(BaseModel):
-    active: bool | None = None
-    keywords: list[str] | None = None
-
-
-class FeedbackIn(BaseModel):
-    value: int = Field(ge=-1, le=1)
-
-
-def owned_paper(db: Session, paper_id: str, user: str) -> Paper:
-    paper = db.get(Paper, paper_id)
-    if not paper or paper.owner_id != user:
-        raise HTTPException(404, "Paper not found")
-    return paper
-
-
-def owned_version(db: Session, version_id: str, user: str) -> Version:
-    version = db.get(Version, version_id)
-    if not version:
-        raise HTTPException(404, "Version not found")
-    owned_paper(db, version.paper_id, user)
-    return version
-
-
-def paper_json(paper: Paper) -> dict:
-    return {
-        key: getattr(paper, key)
-        for key in (
-            "id",
-            "title",
-            "authors",
-            "abstract",
-            "doi",
-            "arxiv_id",
-            "openalex_id",
-            "year",
-            "preferred_version_id",
-            "source",
-            "created_at",
-        )
-    }
-
-
-def version_json(version: Version) -> dict:
-    return {
-        key: getattr(version, key)
-        for key in (
-            "id",
-            "paper_id",
-            "label",
-            "filename",
-            "page_count",
-            "parse_status",
-            "created_at",
-        )
-    }
-
-
-def task_json(task: BackgroundTask) -> dict:
-    return {
-        key: getattr(task, key)
-        for key in ("id", "type", "status", "progress", "result", "error", "retries", "created_at")
-    }
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -279,6 +152,122 @@ def login(data: LoginIn):
     if not check_login(data.email, data.password):
         raise HTTPException(401, "Invalid credentials")
     return {"access_token": make_token(), "token_type": "bearer"}
+
+
+def _model_candidate(data: ModelConfigIn, user: str, db: Session):
+    try:
+        base_url = validate_endpoint(data.provider, data.base_url, data.model)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    previous = db.get(UserModelConfig, user)
+    key = data.api_key.strip()
+    if (
+        not key
+        and previous
+        and previous.base_url == base_url
+        and data.provider in ("openai", "ohmygpt")
+        and previous.provider in ("openai", "ohmygpt")
+    ):
+        key = decrypt_key(previous.api_key_ciphertext)
+    if not key and not previous:
+        default = settings()
+        if (
+            base_url == default.llm_base_url.rstrip("/")
+            and data.provider in ("openai", "ohmygpt")
+            and default.llm_provider in ("openai", "ohmygpt")
+        ):
+            key = (
+                default.ohmygpt_api_key
+                if default.llm_provider == "ohmygpt"
+                else default.llm_api_key
+            )
+    if (
+        data.provider != "ollama"
+        and not key
+        and not base_url.startswith(("http://localhost", "http://127.0.0.1"))
+    ):
+        raise HTTPException(422, "远程模型接口需要 API Key")
+    return base_url, key
+
+
+@app.get(API + "/model-config")
+def get_model_config(user: str = Depends(current_user), db: Session = Depends(get_db)):
+    row = db.get(UserModelConfig, user)
+    default = settings()
+    return {
+        "source": "custom" if row else "default",
+        "provider": row.provider if row else default.llm_provider,
+        "base_url": row.base_url if row else default.llm_base_url,
+        "model": row.model if row else default.llm_model,
+        "has_api_key": bool(row.api_key_ciphertext)
+        if row
+        else bool(
+            default.ohmygpt_api_key if default.llm_provider == "ohmygpt" else default.llm_api_key
+        ),
+    }
+
+
+@app.post(API + "/model-config/test")
+def test_model_config(
+    data: ModelConfigIn, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    base_url, key = _model_candidate(data, user, db)
+    candidate = settings().model_copy(
+        update={
+            "llm_provider": data.provider,
+            "llm_base_url": base_url,
+            "llm_model": data.model.strip(),
+            "llm_api_key": key,
+            "ohmygpt_api_key": key,
+        }
+    )
+    try:
+        reply = generate(
+            "Reply briefly in Chinese.", "请回复：连接成功", max_tokens=40, llm_config=candidate
+        )
+    except AuthenticationError as exc:
+        source = "输入的" if data.api_key.strip() else "已保存或服务器默认的"
+        raise HTTPException(
+            422, f"接口鉴权失败（HTTP 401）：请检查{source} API Key 是否属于当前 Base URL。"
+        ) from exc
+    except RateLimitError as exc:
+        raise HTTPException(503, "接口限流（HTTP 429），请稍后重试；模型配置尚未切换。") from exc
+    except NotFoundError as exc:
+        raise HTTPException(
+            422, "模型或接口路径未找到（HTTP 404），请核对 Base URL 和模型名称。"
+        ) from exc
+    except BadRequestError as exc:
+        raise HTTPException(
+            422, "接口拒绝了测试请求（HTTP 400），请检查接口类型和模型名称是否匹配。"
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(422, f"连接测试失败：{type(exc).__name__}") from exc
+    if not reply.strip():
+        raise HTTPException(422, "模型返回空内容，请检查接口和模型名称")
+    return {"reply": reply.strip()[:300]}
+
+
+@app.put(API + "/model-config")
+def update_model_config(
+    data: ModelConfigIn, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    base_url, key = _model_candidate(data, user, db)
+    save_user_config(user, data.provider, base_url, data.model.strip(), key)
+    return {
+        "source": "custom",
+        "provider": data.provider,
+        "base_url": base_url,
+        "model": data.model.strip(),
+    }
+
+
+@app.delete(API + "/model-config")
+def reset_model_config(user: str = Depends(current_user), db: Session = Depends(get_db)):
+    row = db.get(UserModelConfig, user)
+    if row:
+        db.delete(row)
+        db.commit()
+    return {"source": "default"}
 
 
 @app.post(API + "/papers/upload")
@@ -345,7 +334,9 @@ async def upload_papers(
         result["paper_ids"].append(paper.id)
         result["version_ids"].append(version.id)
         if same:
-            previous = db.get(Version, paper.preferred_version_id)
+            previous = (
+                db.get(Version, paper.preferred_version_id) if paper.preferred_version_id else None
+            )
             old_number = int(previous.label[1:]) if previous and previous.label[1:].isdigit() else 0
             new_number = int(version.label[1:]) if version.label[1:].isdigit() else 0
             result["conflicts"].append(
@@ -537,6 +528,11 @@ def list_tasks(user: str = Depends(current_user), db: Session = Depends(get_db))
         .order_by(BackgroundTask.created_at.desc())
     ).all()
     return {"items": [task_json(x) for x in tasks]}
+
+
+@app.get(API + "/activity")
+def list_activity(user: str = Depends(current_user), db: Session = Depends(get_db)):
+    return {"items": activity_feed(db, user)}
 
 
 @app.get(API + "/debug/overview", dependencies=[Depends(debug_access)])
@@ -878,14 +874,22 @@ def translate(data: TranslateIn, user: str = Depends(current_user), db: Session 
 
 @app.post(API + "/discovery/search")
 def discover(data: SearchIn, _user: str = Depends(current_user)):
-    openalex = search_external(data.query, data.limit)
+    openalex = search_external(data.query, data.limit, sort=None)
     try:
-        arxiv = search_arxiv(data.query, data.limit)
+        arxiv = search_arxiv(data.query, data.limit, sort_by="relevance")
     except Exception:
         arxiv = []
-    seen = {x["title"].lower() for x in openalex}
+
+    def normalize_title(title: str) -> str:
+        return re.sub(r"[^\w]+", "", title.casefold())
+
+    seen = {normalize_title(x["title"]) for x in openalex}
+    papers = openalex + [x for x in arxiv if normalize_title(x["title"]) not in seen]
+    exact_title = normalize_title(data.query)
+    # Stable sort preserves each provider's relevance order below exact title matches.
+    papers.sort(key=lambda paper: normalize_title(paper["title"]) != exact_title)
     return {
-        "papers": openalex + [x for x in arxiv if x["title"].lower() not in seen],
+        "papers": papers,
         "provenance": ["OpenAlex", "arXiv"],
     }
 
@@ -910,7 +914,7 @@ def import_paper(data: ImportIn, user: str = Depends(current_user), db: Session 
     elif data.openalex_id and re.fullmatch(r"https://openalex.org/W\d+", data.openalex_id):
         import httpx
 
-        from .discovery import openalex_headers
+        from .paper_discovery.discovery import openalex_headers
 
         work = httpx.get(
             "https://api.openalex.org/works/" + data.openalex_id.rsplit("/", 1)[-1],
@@ -1428,9 +1432,7 @@ def get_graph_review_research(
     work_titles = {
         work.id: work.title
         for work in db.scalars(
-            select(ScholarlyWork).where(
-                ScholarlyWork.id.in_({item.work_id for item in evidence})
-            )
+            select(ScholarlyWork).where(ScholarlyWork.id.in_({item.work_id for item in evidence}))
         )
     }
     return {
@@ -1506,12 +1508,16 @@ def queue_graph_insight(
             and (
                 len(run.sections) < len(run.outline["sections"])
                 or not run.error
-                or run.error.startswith(("Server error", "Client error", "Connect", "ReadTimeout", "Local model"))
+                or run.error.startswith(
+                    ("Server error", "Client error", "Connect", "ReadTimeout", "Local model")
+                )
             )
         ):
             run.task_id = task.id
             run.status = "queued"
-            run.phase = "writing" if len(run.sections) < len(run.outline["sections"]) else "verifying"
+            run.phase = (
+                "writing" if len(run.sections) < len(run.outline["sections"]) else "verifying"
+            )
             run.error = None
             run.updated_at = now()
         else:
@@ -1663,133 +1669,3 @@ def import_graph_node(
 def synthesize(data: ChatIn, user: str = Depends(current_user), db: Session = Depends(get_db)):
     run = create_run(db, user, data.question, data.paper_ids, "synthesis")
     return {"run_id": run.id, "future_work": future_work(db, data.paper_ids)}
-
-
-@app.get(API + "/copilot/draft/graph-options")
-def draft_graph_options(user: str = Depends(current_user), db: Session = Depends(get_db)):
-    return {"items": graph_options(db, user)}
-
-
-@app.post(API + "/copilot/draft/analyze")
-def draft_analyze(data: DraftAnalyzeIn, _user: str = Depends(current_user)):
-    try:
-        return {"fields": analyze_idea(data.idea)}
-    except (ValueError, TypeError) as exc:
-        raise HTTPException(422, f"IDEA 分析失败：{exc}") from exc
-
-
-@app.post(API + "/copilot/draft/complete")
-def draft_complete(data: DraftCompleteIn, _user: str = Depends(current_user)):
-    try:
-        return {"fields": complete_fields(data.idea, data.fields)}
-    except (ValueError, TypeError) as exc:
-        raise HTTPException(422, f"IDEA 补全失败：{exc}") from exc
-
-
-@app.post(API + "/copilot/draft")
-def draft(data: DraftIn, user: str = Depends(current_user), db: Session = Depends(get_db)):
-    try:
-        if data.graph_id:
-            if data.idea_index is None:
-                raise ValueError("请选择图谱中的 IDEA")
-            context = graph_writing_context(db, user, data.graph_id, data.idea_index)
-            result = create_draft(
-                context["idea"], review=context["review"], seed_candidates=context["candidates"]
-            )
-            if context["stale"]:
-                result["warnings"].append("图谱综述或 IDEA 早于当前图谱版本，建议重新生成图谱分析")
-        else:
-            if len(data.idea.strip()) < 10:
-                raise ValueError("IDEA 至少需要 10 个字符")
-            result = create_draft(data.idea, data.fields)
-    except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(422, f"草稿生成失败：{exc}") from exc
-    artifact = Artifact(
-        owner_id=user,
-        type="draft",
-        file_key=f"artifacts/{user}/{secrets.token_hex(12)}.md",
-        metadata_json={
-            "references": result["references"],
-            "candidates": result["candidates"],
-            "warnings": result["warnings"],
-            "fields": result["fields"],
-            "graph_id": data.graph_id,
-            "idea_index": data.idea_index,
-        },
-    )
-    Storage().put(artifact.file_key, result["markdown"].encode(), "text/markdown")
-    db.add(artifact)
-    db.commit()
-    return {**result, "artifact_id": artifact.id}
-
-
-@app.post(API + "/copilot/diagrams")
-def diagram(data: DiagramIn, _user: str = Depends(current_user)):
-    try:
-        return {
-            "format": "mermaid",
-            "script": generate_mermaid(data.description, data.previous, data.error),
-        }
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-
-
-@app.post(API + "/copilot/charts")
-async def chart(
-    file: UploadFile = File(...),
-    chart_type: str = "auto",
-    user: str = Depends(current_user),
-    db: Session = Depends(get_db),
-):
-    data = await file.read(5_000_001)
-    try:
-        frame, overview = inspect_csv(data)
-        intent = choose_chart(frame, overview, chart_type)
-        rows, caption, spec = chart_data(frame, intent)
-    except (ValueError, UnicodeError) as exc:
-        raise HTTPException(422, str(exc)) from exc
-    source = Artifact(
-        owner_id=user,
-        type="csv",
-        file_key=f"artifacts/{user}/{secrets.token_hex(12)}.csv",
-        metadata_json={"filename": file.filename},
-    )
-    Storage().put(source.file_key, data, "text/csv")
-    db.add(source)
-    db.commit()
-    return {
-        "task_id": None,
-        "caption": caption,
-        "spec": spec,
-        "overview": overview,
-        "rows": rows,
-        "data_artifact_id": source.id,
-    }
-
-
-@app.post(API + "/copilot/charts/caption")
-def update_chart_caption(
-    data: ChartCaptionIn, user: str = Depends(current_user), db: Session = Depends(get_db)
-):
-    source = db.get(Artifact, data.data_artifact_id)
-    if not source or source.owner_id != user or source.type != "csv":
-        raise HTTPException(404, "CSV not found")
-    try:
-        frame, _ = inspect_csv(Storage().get(source.file_key))
-        rows, caption, spec = chart_data(frame, data.spec)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    return {"rows": rows, "caption": caption, "spec": spec}
-
-
-@app.get(API + "/artifacts/{artifact_id}")
-def get_artifact(
-    artifact_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)
-):
-    artifact = db.get(Artifact, artifact_id)
-    if not artifact or artifact.owner_id != user:
-        raise HTTPException(404, "Artifact not found")
-    media_type = "text/csv" if artifact.type == "csv" else "image/png"
-    return Response(Storage().get(artifact.file_key), media_type=media_type)

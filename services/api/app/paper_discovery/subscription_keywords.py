@@ -2,7 +2,7 @@
 
 import json
 
-from .ai import generate
+from ..ai import generate
 
 
 def normalize_keywords(topic: str, selected: list[str] | None) -> list[str]:

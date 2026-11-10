@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import RequestProgress from "@/components/RequestProgress";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
@@ -14,8 +15,8 @@ import {
   Network,
   PanelLeftClose,
   PanelLeftOpen,
+  Settings2,
   Sparkles,
-  Terminal,
   X,
 } from "lucide-react";
 
@@ -30,15 +31,17 @@ const groups = [
     ],
   },
   {
-    label: "创作与管理",
+    label: "创作",
     links: [
       { href: "/copilot", label: "写作与绘图", icon: ChartNoAxesCombined },
-      { href: "/tasks", label: "任务中心", icon: ListTodo },
     ],
   },
   {
     label: "系统",
-    links: [{ href: "/debug", label: "调试后台", icon: Terminal }],
+    links: [
+      { href: "/tasks", label: "任务动态", icon: ListTodo },
+      { href: "/settings", label: "模型接口", icon: Settings2 },
+    ],
   },
 ] as const;
 
@@ -166,6 +169,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       <div className="app-frame">
+        <RequestProgress />
         <header className="topbar">
           <div className="topbar-location">
             <button

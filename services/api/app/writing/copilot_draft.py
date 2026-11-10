@@ -5,11 +5,11 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from .ai import generate
-from .citation_identity import normalize_identifier
+from ..ai import generate
+from ..citation.citation_identity import normalize_identifier
+from ..paper_discovery.discovery import search_arxiv, search_external
 from .copilot_idea import analyze_idea, complete_fields, normalize_fields
 from .copilot_references import verify_reference
-from .discovery import search_arxiv, search_external
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +235,7 @@ def create_draft(
     review: str = "",
     seed_candidates: list[dict] | None = None,
 ) -> dict:
+    """Generate a draft from structured IDEA fields and program-verified references."""
     preparation_warnings = []
     if fields is not None:
         structured = normalize_fields(fields)

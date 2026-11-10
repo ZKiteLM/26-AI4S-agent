@@ -1,61 +1,143 @@
 "use client";
-import { useEffect, useState } from "react";
+
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { api } from "@/lib/api";
-type Task = {
+import OperationProgress from "@/components/OperationProgress";
+
+type Activity = {
   id: string;
-  type: string;
+  title: string;
+  detail: string;
   status: string;
-  progress: number;
-  error: string | null;
-  result: Record<string, unknown>;
+  progress: number | null;
+  created_at: string | null;
+  href: string;
+  retryable: boolean;
 };
+const active = new Set(["queued", "running", "searching", "scoring"]);
+const labels: Record<string, string> = {
+  queued: "等待中",
+  running: "进行中",
+  searching: "检索中",
+  scoring: "分析中",
+  completed: "已完成",
+  partial: "部分完成",
+  failed: "未完成",
+};
+
 export default function Tasks() {
-  const [tasks, setTasks] = useState<Task[]>([]),
-    [error, setError] = useState("");
-  const load = () =>
-    api<{ items: Task[] }>("/tasks")
-      .then((x) => setTasks(x.items))
-      .catch((e) => setError(String(e)));
+  const [items, setItems] = useState<Activity[]>([]);
+  const [filter, setFilter] = useState<"active" | "all">("active");
+  const [error, setError] = useState("");
+  const load = useCallback(() => {
+    api<{ items: Activity[] }>("/activity")
+      .then((data) => {
+        setItems(data.items);
+        setError("");
+      })
+      .catch((cause) => setError(String(cause)));
+  }, []);
   useEffect(() => {
     load();
-    const timer = setInterval(load, 3000);
-    return () => clearInterval(timer);
-  }, []);
+    const timer = window.setInterval(load, 3000);
+    return () => window.clearInterval(timer);
+  }, [load]);
   async function retry(id: string) {
     try {
       await api(`/tasks/${id}/retry`, { method: "POST" });
       load();
-    } catch (e) {
-      setError(String(e));
+    } catch (cause) {
+      setError(String(cause));
     }
   }
+  const visible =
+    filter === "active"
+      ? items.filter((item) => active.has(item.status))
+      : items;
   return (
-    <>
+    <section className="task-activity">
+      <div className="task-activity-top">
+        <div>
+          <h2>任务动态</h2>
+          <p className="muted">
+            论文解析、科研问答、主题追踪和引用图谱的处理进度会自动更新。
+          </p>
+        </div>
+        <span className="badge">
+          进行中 {items.filter((item) => active.has(item.status)).length}
+        </span>
+      </div>
+      <div className="citation-mode-tabs" role="tablist" aria-label="任务筛选">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={filter === "active"}
+          className={filter === "active" ? "active" : ""}
+          onClick={() => setFilter("active")}
+        >
+          进行中
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={filter === "all"}
+          className={filter === "all" ? "active" : ""}
+          onClick={() => setFilter("all")}
+        >
+          全部任务
+        </button>
+      </div>
       {error && <p className="error">{error}</p>}
-      <div className="list">
-        {tasks.map((t) => (
-          <div className="card" key={t.id}>
-            <div className="toolbar">
+      <div className="task-activity-list">
+        {visible.map((item) => (
+          <article className="panel task-activity-card" key={item.id}>
+            <div className="task-activity-top">
               <div>
-                <div className="section-label">{t.type}</div>
-                <h2>{t.status}</h2>
+                <span className={`task-state task-state-${item.status}`}>
+                  {labels[item.status] || "处理中"}
+                </span>
+                <h3>{item.title}</h3>
               </div>
-              <span className="badge">{Math.round(t.progress * 100)}%</span>
+              {item.created_at && (
+                <time dateTime={item.created_at}>
+                  {new Date(item.created_at).toLocaleString("zh-CN")}
+                </time>
+              )}
             </div>
-            <progress value={t.progress} max={1} style={{ width: "100%" }} />
-            {t.error && <p className="error">{t.error}</p>}
-            {t.status === "failed" && (
-              <button className="button secondary" onClick={() => retry(t.id)}>
-                重试
-              </button>
+            {active.has(item.status) ? (
+              <OperationProgress
+                title={item.detail}
+                progress={item.progress}
+                startedAt={item.created_at}
+              />
+            ) : (
+              <p className="muted">{item.detail}</p>
             )}
-            {t.status === "completed" && (
-              <p className="muted">{JSON.stringify(t.result)}</p>
-            )}
-          </div>
+            <div className="task-activity-actions">
+              <Link href={item.href} className="button secondary">
+                查看相关页面
+              </Link>
+              {item.retryable && (
+                <button
+                  type="button"
+                  className="button"
+                  onClick={() => retry(item.id)}
+                >
+                  重新解析
+                </button>
+              )}
+            </div>
+          </article>
         ))}
       </div>
-      {!tasks.length && <div className="panel muted">暂无后台任务。</div>}
-    </>
+      {!visible.length && (
+        <div className="panel muted">
+          {filter === "active"
+            ? "当前没有正在处理的任务。可切换到“全部任务”查看历史。"
+            : "还没有后台任务。"}
+        </div>
+      )}
+    </section>
   );
 }

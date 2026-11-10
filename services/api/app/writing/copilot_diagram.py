@@ -2,7 +2,7 @@
 
 import re
 
-from .ai import generate
+from ..ai import generate
 
 ALLOWED = ("flowchart", "graph", "sequenceDiagram", "classDiagram", "stateDiagram-v2", "erDiagram")
 

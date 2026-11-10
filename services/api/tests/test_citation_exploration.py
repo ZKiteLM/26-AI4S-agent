@@ -3,9 +3,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.api.app import citation_graph_service as service
-from services.api.app.citation_identity import normalize_identifier, upsert_work
-from services.api.app.citation_providers import CitationPage
+from services.api.app.citation import citation_graph_service as service
+from services.api.app.citation.citation_identity import normalize_identifier, upsert_work
+from services.api.app.citation.citation_providers import CitationPage
 from services.api.app.db import Base, SessionLocal
 from services.api.app.main import app
 from services.api.app.models import (

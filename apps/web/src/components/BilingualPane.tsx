@@ -5,6 +5,7 @@ import { RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import { nearestBlock, pdfPageAtAnchor, ReaderBlock } from "@/lib/reader";
 import TranslationViewer from "@/components/TranslationViewer";
+import OperationProgress from "@/components/OperationProgress";
 import { useBilingualSync } from "@/hooks/useBilingualSync";
 
 type CachedTranslation = { block_id: string; page_index: number; text: string };
@@ -187,6 +188,7 @@ export default function BilingualPane({
           "/translate",
           {
             method: "POST",
+            progress: "inline",
             body: JSON.stringify({
               version_id: version,
               block_ids: blocks
@@ -240,6 +242,12 @@ export default function BilingualPane({
         </button>
       </div>
       {error && <p className="error">{error}</p>}
+      {busy && (
+        <OperationProgress
+          title="正在翻译当前页"
+          detail="译文将保留公式并逐段显示。"
+        />
+      )}
       <div
         className="continuous-translation-scroll"
         ref={translationRef}

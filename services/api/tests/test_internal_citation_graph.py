@@ -2,10 +2,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.api.app import citation_graph_service as graph_service
-from services.api.app import internal_citation_graph as internal
-from services.api.app.citation_graph_service import add_seed_paper, serialize_view
-from services.api.app.citation_providers import OpenAlexProvider, _matching
+from services.api.app.citation import citation_graph_service as graph_service
+from services.api.app.citation import internal_citation_graph as internal
+from services.api.app.citation.citation_graph_service import add_seed_paper, serialize_view
+from services.api.app.citation.citation_providers import OpenAlexProvider, _matching
 from services.api.app.db import Base
 from services.api.app.main import GraphIn
 from services.api.app.models import (

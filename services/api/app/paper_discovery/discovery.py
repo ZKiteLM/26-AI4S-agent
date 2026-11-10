@@ -4,7 +4,7 @@ from datetime import date
 
 import httpx
 
-from .config import settings
+from ..config import settings
 
 
 def openalex_headers() -> dict[str, str]:
@@ -19,6 +19,7 @@ def search_external(
     *,
     sort: str | None = "publication_date:desc",
 ) -> list[dict]:
+    """Search OpenAlex; ``sort=None`` preserves its relevance order for title lookup."""
     params = {"search": query, "per-page": min(limit, 25)}
     if sort:
         params["sort"] = sort
@@ -55,9 +56,16 @@ def search_external(
     return results
 
 
-def search_arxiv(query: str, limit: int = 10, from_date: date | None = None) -> list[dict]:
+def search_arxiv(
+    query: str,
+    limit: int = 10,
+    from_date: date | None = None,
+    *,
+    sort_by: str = "submittedDate",
+) -> list[dict]:
+    """Search arXiv by phrase or exact ID with caller-selected result ordering."""
     identifier = _arxiv_id(query)
-    params = {"max_results": min(limit, 25), "sortBy": "submittedDate", "sortOrder": "descending"}
+    params = {"max_results": min(limit, 25), "sortBy": sort_by, "sortOrder": "descending"}
     if identifier and query.strip() == identifier:
         params["id_list"] = identifier
     else:

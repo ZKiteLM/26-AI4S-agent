@@ -12,9 +12,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.api.app.charts import chart_data, inspect_csv, validate_intent
+from services.api.app.citation.graphs import build_graph
 from services.api.app.db import Base, SessionLocal, engine
-from services.api.app.graphs import build_graph
 from services.api.app.main import app
 from services.api.app.models import AgentRun, BackgroundTask, Block, Paper, Translation, Version
 from services.api.app.parsing import (
@@ -25,6 +24,7 @@ from services.api.app.parsing import (
     parse_pdf,
 )
 from services.api.app.translation import protect_math, restore_math, translate_text
+from services.api.app.writing.charts import chart_data, inspect_csv, validate_intent
 
 
 def test_subscription_candidates_are_separate_from_library(monkeypatch):
@@ -74,7 +74,7 @@ def test_subscription_candidates_are_separate_from_library(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "services.api.app.recommender.generate",
+        "services.api.app.paper_discovery.recommender.generate",
         analyze,
     )
     with SessionLocal() as db:
@@ -176,7 +176,7 @@ def test_recommendation_missing_metrics_are_unknown(monkeypatch):
     from datetime import datetime
 
     from services.api.app.models import PaperCandidate
-    from services.api.app.recommender import score_analyses, weighted_score
+    from services.api.app.paper_discovery.recommender import score_analyses, weighted_score
 
     candidate = PaperCandidate(
         id="candidate-test",
@@ -187,7 +187,9 @@ def test_recommendation_missing_metrics_are_unknown(monkeypatch):
         source="arXiv",
         published_at=datetime(2026, 10, 1),
     )
-    monkeypatch.setattr("services.api.app.recommender.generate", lambda *_args, **_kwargs: 1 / 0)
+    monkeypatch.setattr(
+        "services.api.app.paper_discovery.recommender.generate", lambda *_args, **_kwargs: 1 / 0
+    )
     assert score_analyses("topic", [candidate]) == {}
     score, factors = weighted_score(candidate, None)
     assert 0 <= score <= 100
@@ -615,7 +617,7 @@ def test_citation_graph_keeps_citing_to_cited_direction(monkeypatch):
         db.commit()
         newer_id, older_id = newer.id, older.id
         monkeypatch.setattr(
-            "services.api.app.graphs._references",
+            "services.api.app.citation.graphs._references",
             lambda key: ["https://openalex.org/W2"] if key == "https://openalex.org/W1" else [],
         )
         result = build_graph(db, "owner", [newer_id, older_id])
@@ -817,7 +819,9 @@ def test_ollama_json_retries_without_unsupported_structured_output(monkeypatch):
     assert payloads[0]["format"] == "json"
     assert "format" not in payloads[1]
     assert "valid JSON object" in payloads[1]["messages"][0]["content"]
-    assert json.loads(ai.chat_with_tools([{"role": "user", "content": "Ready?"}], [], json_mode=True)["content"]) == {"ok": True}
+    assert json.loads(
+        ai.chat_with_tools([{"role": "user", "content": "Ready?"}], [], json_mode=True)["content"]
+    ) == {"ok": True}
 
 
 def test_cloud_mode_rejects_local_model_endpoints():

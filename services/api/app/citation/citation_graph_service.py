@@ -8,16 +8,8 @@ import networkx as nx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .citation_identity import link_paper_to_work, record_identity_conflicts, upsert_work
-from .citation_providers import (
-    OpenAlexProvider,
-    SemanticScholarProvider,
-    provider_for,
-    resolve_paper,
-)
-from .config import settings
-from .graphs import _pagerank
-from .models import (
+from ..config import settings
+from ..models import (
     CitationFetchState,
     GraphView,
     GraphViewNode,
@@ -26,6 +18,14 @@ from .models import (
     ScholarlyWork,
     now,
 )
+from .citation_identity import link_paper_to_work, record_identity_conflicts, upsert_work
+from .citation_providers import (
+    OpenAlexProvider,
+    SemanticScholarProvider,
+    provider_for,
+    resolve_paper,
+)
+from .graphs import _pagerank
 
 logger = logging.getLogger(__name__)
 MAX_NODES = 500

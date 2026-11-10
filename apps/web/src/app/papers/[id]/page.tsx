@@ -424,11 +424,11 @@ export default function Reader({
       {activeVersion && activeVersion.parse_status !== "completed" && (
         <div className="reader-status-inline">
           {activeVersion.parse_status === "failed"
-            ? "解析失败，请到任务中心查看。"
+            ? "解析失败，请到任务动态查看。"
             : activeVersion.parse_status === "conflict"
               ? "此版本等待冲突处理。"
               : "此版本正在解析；页面会自动更新。"}
-          <Link href="/debug">调试后台</Link>
+          <Link href="/tasks">查看任务动态</Link>
         </div>
       )}
       {versions.length > 0 && (

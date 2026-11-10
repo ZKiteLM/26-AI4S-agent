@@ -26,7 +26,9 @@ def identify_pdf(data: bytes, filename: str) -> dict:
     title = (doc.metadata or {}).get("title") or ""
     first_lines = [x.strip() for x in sample.splitlines() if x.strip()]
     if not title or title.lower() in {"untitled", "microsoft word"}:
-        title = _first_page_title(doc[0]) or (first_lines[0] if first_lines else Path(filename).stem)
+        title = _first_page_title(doc[0]) or (
+            first_lines[0] if first_lines else Path(filename).stem
+        )
     match = ARXIV_RE.search(filename) or ARXIV_RE.search(sample[:2000])
     normalized = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", sample.lower())).strip()
     shingles = {normalized[i : i + 60] for i in range(0, max(len(normalized) - 59, 0), 30)}
@@ -49,9 +51,8 @@ def _first_page_title(page: pymupdf.Page) -> str | None:
             continue
         spans = [span for line in block["lines"] for span in line["spans"]]
         text = " ".join(span["text"].strip() for span in spans if span["text"].strip())
-        if (
-            not 8 <= len(text) <= 180
-            or re.search(r"arxiv|copyright|permission|attribution|license|@|^abstract$", text, re.I)
+        if not 8 <= len(text) <= 180 or re.search(
+            r"arxiv|copyright|permission|attribution|license|@|^abstract$", text, re.I
         ):
             continue
         size = max(span["size"] for span in spans)

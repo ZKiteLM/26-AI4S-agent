@@ -23,14 +23,19 @@ def client(monkeypatch):
             output_text='{"ok": true}',
             output=[
                 SimpleNamespace(
-                    type="function_call", call_id="call-1", name="search_bm25", arguments='{"query":"transformer"}'
+                    type="function_call",
+                    call_id="call-1",
+                    name="search_bm25",
+                    arguments='{"query":"transformer"}',
                 )
             ],
         )
 
     monkeypatch.setattr(ai, "settings", lambda: config)
     monkeypatch.setattr(
-        ai, "_ohmygpt_client", lambda _cfg: SimpleNamespace(responses=SimpleNamespace(create=create))
+        ai,
+        "_ohmygpt_client",
+        lambda _cfg: SimpleNamespace(responses=SimpleNamespace(create=create)),
     )
     return requests
 
@@ -75,7 +80,12 @@ def test_tool_history_round_trips_through_responses(client):
     assert answer["tool_calls"][0]["id"] == "call-1"
     assert answer["tool_calls"][0]["function"]["name"] == "search_bm25"
     assert client[0]["input"][-2:] == [
-        {"type": "function_call", "call_id": "call-0", "name": "search_bm25", "arguments": '{"query":"encoder"}'},
+        {
+            "type": "function_call",
+            "call_id": "call-0",
+            "name": "search_bm25",
+            "arguments": '{"query":"encoder"}',
+        },
         {"type": "function_call_output", "call_id": "call-0", "output": "result"},
     ]
     assert client[0]["tools"][0]["name"] == "search_bm25"

@@ -7,8 +7,8 @@ import networkx as nx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .discovery import search_external
-from .models import Block, CitationEdge, Paper, Version
+from ..models import Block, CitationEdge, Paper, Version
+from ..paper_discovery.discovery import search_external
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ def _search_title(title: str) -> list[dict]:
 
 def _references(openalex_id: str) -> list[str]:
     try:
-        from .discovery import openalex_headers
+        from ..paper_discovery.discovery import openalex_headers
 
         response = httpx.get(
             "https://api.openalex.org/works/" + openalex_id.rsplit("/", 1)[-1],

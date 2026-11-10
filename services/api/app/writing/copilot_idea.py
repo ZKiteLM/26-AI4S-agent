@@ -2,7 +2,7 @@
 
 import json
 
-from .ai import generate
+from ..ai import generate
 
 FIELDS = ("research_problem", "core_motivation", "solution", "expected_contribution")
 MAX_KEYWORDS = 8

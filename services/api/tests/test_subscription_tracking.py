@@ -12,7 +12,7 @@ from services.api.app.auth import current_user
 from services.api.app.db import Base, get_db
 from services.api.app.main import app
 from services.api.app.models import Paper, PaperCandidate, Recommendation, Subscription, now
-from services.api.app.subscription_keywords import generate_keywords
+from services.api.app.paper_discovery.subscription_keywords import generate_keywords
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def work(title, source="OpenAlex"):
 
 def test_keyword_generation_keeps_llm_suggestions_and_deduplicates(monkeypatch):
     monkeypatch.setattr(
-        "services.api.app.subscription_keywords.generate",
+        "services.api.app.paper_discovery.subscription_keywords.generate",
         lambda *a, **k: json.dumps(
             {
                 "keywords": [
@@ -77,7 +77,9 @@ def test_keyword_generation_keeps_llm_suggestions_and_deduplicates(monkeypatch):
         "autonomous agents powered by language models",
         "agent-based large language models",
     ]
-    monkeypatch.setattr("services.api.app.subscription_keywords.generate", lambda *a, **k: "bad")
+    monkeypatch.setattr(
+        "services.api.app.paper_discovery.subscription_keywords.generate", lambda *a, **k: "bad"
+    )
     with pytest.raises(ValueError, match="JSON"):
         generate_keywords("large language model agents")
 
@@ -85,7 +87,7 @@ def test_keyword_generation_keeps_llm_suggestions_and_deduplicates(monkeypatch):
 def test_keyword_api_failure_and_persistence(tracking, monkeypatch):
     client, sessions, queued = tracking
     monkeypatch.setattr(
-        "services.api.app.subscription_keywords.generate",
+        "services.api.app.paper_discovery.subscription_keywords.generate",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")),
     )
     assert (
@@ -404,7 +406,7 @@ def test_llm_failure_keeps_score_unknown(tracking, monkeypatch):
 
 
 def test_topic_filter_never_uses_another_topics_score(tracking):
-    from services.api.app.recommender import upsert_recommendation
+    from services.api.app.paper_discovery.recommender import upsert_recommendation
 
     client, sessions, _queued = tracking
     client.post("/api/v1/subscriptions", json={"topic": "Topic A"})

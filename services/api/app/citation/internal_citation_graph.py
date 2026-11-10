@@ -9,11 +9,11 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import settings
+from ..models import Block, GraphView, GraphViewNode, Paper, ScholarlyWork, Version, now
 from .citation_graph_service import _edge, _state, attach_identity
 from .citation_identity import identifiers, normalize_identifier
 from .citation_providers import OpenAlexProvider, SemanticScholarProvider
-from .config import settings
-from .models import Block, GraphView, GraphViewNode, Paper, ScholarlyWork, Version, now
 
 logger = logging.getLogger(__name__)
 MAX_S2_REFERENCES = 5000
