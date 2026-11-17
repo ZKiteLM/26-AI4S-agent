@@ -61,7 +61,7 @@ export default function Tasks() {
         <div>
           <h2>任务动态</h2>
           <p className="muted">
-            论文解析、科研问答、主题追踪和引用图谱的处理进度会自动更新。
+            论文解析、科研问答、主题追踪、引用图谱和论文框架的处理进度会自动更新。
           </p>
         </div>
         <span className="badge">

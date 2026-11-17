@@ -4,17 +4,18 @@ import secrets
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import current_user
 from ..db import get_db
-from ..models import Artifact
+from ..models import Artifact, BackgroundTask
 from ..storage import Storage
 from ..writing.charts import chart_data, choose_chart, inspect_csv
 from ..writing.copilot_diagram import generate_mermaid
-from ..writing.copilot_draft import create_draft
-from ..writing.copilot_graph import graph_options, graph_writing_context
+from ..writing.copilot_graph import graph_options
 from ..writing.copilot_idea import analyze_idea, complete_fields
+from ..writing.copilot_jobs import build_draft, load_draft
 from .schemas import ChartCaptionIn, DiagramIn, DraftAnalyzeIn, DraftCompleteIn, DraftIn
 
 router = APIRouter(prefix="/api/v1")
@@ -44,41 +45,85 @@ def draft_complete(data: DraftCompleteIn, _user: str = Depends(current_user)):
 @router.post("/copilot/draft")
 def draft(data: DraftIn, user: str = Depends(current_user), db: Session = Depends(get_db)):
     try:
-        if data.graph_id:
-            if data.idea_index is None:
-                raise ValueError("请选择图谱中的 IDEA")
-            context = graph_writing_context(db, user, data.graph_id, data.idea_index)
-            result = create_draft(
-                context["idea"], review=context["review"], seed_candidates=context["candidates"]
-            )
-            if context["stale"]:
-                result["warnings"].append("图谱综述或 IDEA 早于当前图谱版本，建议重新生成图谱分析")
-        else:
-            if len(data.idea.strip()) < 10:
-                raise ValueError("IDEA 至少需要 10 个字符")
-            result = create_draft(data.idea, data.fields)
+        return build_draft(db, user, data.model_dump())
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(422, f"草稿生成失败：{exc}") from exc
-    # Persist only the validated draft; the reference service constructs its bibliography.
-    artifact = Artifact(
-        owner_id=user,
-        type="draft",
-        file_key=f"artifacts/{user}/{secrets.token_hex(12)}.md",
-        metadata_json={
-            "references": result["references"],
-            "candidates": result["candidates"],
-            "warnings": result["warnings"],
-            "fields": result["fields"],
-            "graph_id": data.graph_id,
-            "idea_index": data.idea_index,
-        },
-    )
-    Storage().put(artifact.file_key, result["markdown"].encode(), "text/markdown")
-    db.add(artifact)
+
+
+def _draft_job(task: BackgroundTask) -> dict:
+    return {
+        "id": task.id,
+        "mode": "graph" if task.args.get("graph_id") else "manual",
+        "status": task.status,
+        "progress": task.progress,
+        "phase": (task.result or {}).get("phase"),
+        "artifact_id": (task.result or {}).get("artifact_id"),
+        "error": task.error,
+        "created_at": task.created_at,
+    }
+
+
+@router.post("/copilot/draft/jobs")
+def start_draft_job(
+    data: DraftIn, user: str = Depends(current_user), db: Session = Depends(get_db)
+):
+    payload = data.model_dump()
+    if not data.graph_id and len(data.idea.strip()) < 10:
+        raise HTTPException(422, "IDEA 至少需要 10 个字符")
+    if data.graph_id and data.idea_index is None:
+        raise HTTPException(422, "请选择图谱中的 IDEA")
+    # Keep one active generation per user and source mode across tabs and reloads.
+    active = db.scalars(
+        select(BackgroundTask).where(
+            BackgroundTask.owner_id == user,
+            BackgroundTask.type == "copilot_draft",
+            BackgroundTask.status.in_(("queued", "running")),
+        )
+    ).all()
+    mode = "graph" if data.graph_id else "manual"
+    for task in active:
+        if ("graph" if task.args.get("graph_id") else "manual") == mode:
+            return _draft_job(task)
+    task = BackgroundTask(owner_id=user, type="copilot_draft", args=payload)
+    db.add(task)
     db.commit()
-    return {**result, "artifact_id": artifact.id}
+    from ..worker import run_copilot_draft
+
+    try:
+        run_copilot_draft.apply_async(args=[task.id], queue="default")
+    except Exception as exc:
+        task.status = "failed"
+        task.error = f"后台任务提交失败：{type(exc).__name__}"
+        db.commit()
+        raise HTTPException(503, task.error) from exc
+    return _draft_job(task)
+
+
+@router.get("/copilot/draft/jobs")
+def list_draft_jobs(user: str = Depends(current_user), db: Session = Depends(get_db)):
+    tasks = db.scalars(
+        select(BackgroundTask)
+        .where(BackgroundTask.owner_id == user, BackgroundTask.type == "copilot_draft")
+        .order_by(BackgroundTask.created_at.desc())
+        .limit(30)
+    ).all()
+    return {"items": [_draft_job(task) for task in tasks]}
+
+
+@router.get("/copilot/draft/jobs/{task_id}")
+def get_draft_job(task_id: str, user: str = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.get(BackgroundTask, task_id)
+    if not task or task.owner_id != user or task.type != "copilot_draft":
+        raise HTTPException(404, "Draft task not found")
+    item = _draft_job(task)
+    artifact_id = item["artifact_id"]
+    if task.status == "completed" and artifact_id:
+        artifact = db.get(Artifact, artifact_id)
+        if artifact and artifact.owner_id == user and artifact.type == "draft":
+            item["draft"] = load_draft(artifact)
+    return item
 
 
 @router.post("/copilot/diagrams")

@@ -24,9 +24,9 @@ const examples: Record<Provider, { url: string; model: string }> = {
 
 export default function ModelSettings() {
   const [saved, setSaved] = useState<ModelConfig | null>(null);
-  const [provider, setProvider] = useState<Provider>("openai");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [model, setModel] = useState("");
+  const [provider, setProvider] = useState<Provider>("ollama");
+  const [baseUrl, setBaseUrl] = useState(examples.ollama.url);
+  const [model, setModel] = useState(examples.ollama.model);
   const [apiKey, setApiKey] = useState("");
   const [tested, setTested] = useState(false);
   const [reply, setReply] = useState("");
@@ -66,6 +66,13 @@ export default function ModelSettings() {
     model: model.trim(),
     api_key: apiKey.trim(),
   };
+  const hasPendingChanges = Boolean(
+    saved &&
+    (provider !== saved.provider ||
+      baseUrl.trim() !== saved.base_url ||
+      model.trim() !== saved.model ||
+      apiKey.trim()),
+  );
   async function test() {
     setBusy("test");
     setError("");
@@ -132,10 +139,42 @@ export default function ModelSettings() {
             服务的机器；部署到云端后，请使用服务器可访问的外部接口。
           </p>
         </div>
-        <span className="badge">
-          {saved?.source === "custom" ? "自定义模型" : "服务器默认模型"}
-        </span>
       </div>
+      {saved && (
+        <div className="model-active-config" aria-live="polite">
+          <div className="model-active-heading">
+            <strong>当前使用的接口</strong>
+            <span className="badge">
+              {saved.source === "custom" ? "自定义配置" : "服务器默认配置"}
+            </span>
+          </div>
+          <dl className="model-active-details">
+            <div>
+              <dt>接口类型</dt>
+              <dd>
+                {saved.provider === "ollama"
+                  ? "本机 Ollama"
+                  : saved.provider === "ohmygpt"
+                    ? "OpenAI Responses 接口"
+                    : "OpenAI 兼容接口"}
+              </dd>
+            </div>
+            <div>
+              <dt>模型</dt>
+              <dd>{saved.model || "未配置"}</dd>
+            </div>
+            <div>
+              <dt>Base URL</dt>
+              <dd>{saved.base_url || "未配置"}</dd>
+            </div>
+          </dl>
+          {hasPendingChanges && (
+            <p className="model-active-note">
+              下方有未保存的修改；当前任务仍使用上方显示的接口。
+            </p>
+          )}
+        </div>
+      )}
       <div className="model-settings-fields">
         <label>
           接口类型

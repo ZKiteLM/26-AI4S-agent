@@ -7,6 +7,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "科研小助手",
   description: "可溯源的 AI 科研工作台",
+  icons: { icon: "/logo.jpg" },
 };
 
 export default function RootLayout({

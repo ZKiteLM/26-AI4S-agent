@@ -1,8 +1,9 @@
 "use client";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { API } from "@/lib/api";
-import { BookOpenText, FileSearch, Languages, Sparkles } from "lucide-react";
+import { FileSearch, Languages, Sparkles } from "lucide-react";
 
 export default function Login() {
   const router = useRouter();
@@ -34,7 +35,7 @@ export default function Login() {
       <section className="login-showcase">
         <div className="brand">
           <span className="brand-mark">
-            <BookOpenText size={21} />
+            <Image src="/logo.jpg" alt="" width={52} height={52} priority />
           </span>
           <span className="brand-copy">
             科研小助手<small>RESEARCH WORKSPACE</small>

@@ -1,6 +1,16 @@
 .git
 .venv
-.env
+.env*
+**/.env*
+.DS_Store
+**/.DS_Store
+*.pem
+*.p12
+*.pfx
+*.db
+*.sqlite3
+*.log
+.local_services
 dev.db
 storage
 科研小助手

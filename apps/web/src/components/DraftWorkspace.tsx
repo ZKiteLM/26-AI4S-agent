@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { useSessionState } from "@/lib/useSessionState";
@@ -29,11 +29,22 @@ type Candidate = {
   failure_reason?: string;
 };
 type DraftResult = {
+  artifact_id: string;
   markdown: string;
   references: Reference[];
   candidates: Candidate[];
   warnings: string[];
   fields: Fields;
+};
+type DraftJob = {
+  id: string;
+  mode: "manual" | "graph";
+  status: string;
+  progress: number;
+  phase: string | null;
+  artifact_id: string | null;
+  error: string | null;
+  created_at: string;
 };
 type GraphOption = {
   graph_id: string;
@@ -90,11 +101,54 @@ export default function DraftWorkspace() {
   const warnings = activeResult?.warnings || [];
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [jobs, setJobs] = useState<
+    Partial<Record<"manual" | "graph", DraftJob>>
+  >({});
+  const fetched = useRef(new Set<string>());
+  const activeJob = jobs[mode];
+  const generating =
+    activeJob?.status === "queued" || activeJob?.status === "running";
+  const loadJobs = useCallback(async () => {
+    const response = await api<{ items: DraftJob[] }>("/copilot/draft/jobs");
+    const latest: Partial<Record<"manual" | "graph", DraftJob>> = {};
+    for (const job of response.items) latest[job.mode] ??= job;
+    setJobs(latest);
+    for (const job of Object.values(latest)) {
+      if (job?.status !== "completed" || !job.artifact_id) continue;
+      if (fetched.current.has(job.artifact_id)) continue;
+      fetched.current.add(job.artifact_id);
+      try {
+        const detail = await api<DraftJob & { draft?: DraftResult }>(
+          `/copilot/draft/jobs/${job.id}`,
+        );
+        if (detail.draft) {
+          setResults((previous) =>
+            previous[job.mode]?.artifact_id === detail.draft?.artifact_id
+              ? previous
+              : { ...previous, [job.mode]: detail.draft! },
+          );
+        }
+      } catch {
+        fetched.current.delete(job.artifact_id);
+      }
+    }
+  }, [setResults]);
   useEffect(() => {
     api<{ items: GraphOption[] }>("/copilot/draft/graph-options")
       .then((x) => setGraphs(x.items))
       .catch(() => {});
   }, []);
+  useEffect(() => {
+    const initial = window.setTimeout(() => void loadJobs().catch(() => {}), 0);
+    const timer = window.setInterval(
+      () => void loadJobs().catch(() => {}),
+      3000,
+    );
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [loadJobs]);
   const graph = graphs.find((x) => x.graph_id === graphId);
   async function analyze() {
     setBusy("analyze");
@@ -136,19 +190,19 @@ export default function DraftWorkspace() {
     }
   }
   async function generate() {
-    setBusy("generate");
+    setBusy("enqueue");
     setError("");
     try {
       const payload =
         mode === "graph"
           ? { graph_id: graphId, idea_index: ideaIndex }
           : { idea, fields: structured };
-      const result = await api<DraftResult>("/copilot/draft", {
+      const job = await api<DraftJob>("/copilot/draft/jobs", {
         method: "POST",
         progress: "inline",
         body: JSON.stringify(payload),
       });
-      setResults((previous) => ({ ...previous, [mode]: result }));
+      setJobs((previous) => ({ ...previous, [mode]: job }));
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -202,18 +256,45 @@ export default function DraftWorkspace() {
       {busy && (
         <OperationProgress
           title={
-            busy === "generate"
-              ? "正在检索文献并生成论文框架"
+            busy === "enqueue"
+              ? "正在提交论文框架任务"
               : busy === "analyze"
                 ? "正在分析研究 IDEA"
                 : "正在补全研究构想"
           }
           detail={
-            busy === "generate"
-              ? "会核对候选文献、撰写正文并检查引用，可能需要一些时间。"
+            busy === "enqueue"
+              ? "提交后可以切换页面，任务会在后台继续。"
               : "模型正在处理输入，完成后会显示可编辑结果。"
           }
         />
+      )}
+      {generating && (
+        <>
+          <OperationProgress
+            title={
+              {
+                preparing: "正在理解研究想法",
+                searching: "正在检索并核验文献",
+                writing: "正在撰写论文框架",
+                verifying: "正在核对正文引用",
+              }[activeJob.phase || ""] || "论文框架已排队"
+            }
+            detail="切换页面后任务会继续；完成的草稿会自动恢复。"
+            progress={
+              activeJob.status === "running" ? activeJob.progress : null
+            }
+            startedAt={activeJob.created_at}
+          />
+          <p className="muted">
+            <Link href="/tasks">在任务动态查看进度</Link>
+          </p>
+        </>
+      )}
+      {activeJob?.status === "failed" && (
+        <p className="error" role="alert">
+          论文框架生成失败：{activeJob.error || "请重试"}
+        </p>
       )}
       {mode === "graph" ? (
         <div className="stack copilot-source-body">
@@ -279,10 +360,10 @@ export default function DraftWorkspace() {
           )}
           <button
             className="button"
-            disabled={!graph || !!busy}
+            disabled={!graph || !!busy || generating}
             onClick={generate}
           >
-            {busy === "generate" ? "生成中…" : "根据综述与 IDEA 生成框架"}
+            {generating ? "生成中…" : "根据综述与 IDEA 生成框架"}
           </button>
         </div>
       ) : (
@@ -362,10 +443,10 @@ export default function DraftWorkspace() {
                 </button>
                 <button
                   className="button"
-                  disabled={!completed || !!busy}
+                  disabled={!completed || !!busy || generating}
                   onClick={generate}
                 >
-                  {busy === "generate" ? "检索并生成中…" : "3. 生成论文框架"}
+                  {generating ? "检索并生成中…" : "3. 生成论文框架"}
                 </button>
               </div>
             </div>

@@ -29,7 +29,13 @@ def identify_pdf(data: bytes, filename: str) -> dict:
         title = _first_page_title(doc[0]) or (
             first_lines[0] if first_lines else Path(filename).stem
         )
-    match = ARXIV_RE.search(filename) or ARXIV_RE.search(sample[:2000])
+    # The identifier is often printed in the footer of page one, after a long
+    # abstract. Prefer an explicit arXiv label before scanning arbitrary text.
+    match = (
+        ARXIV_RE.search(filename)
+        or re.search(r"(?i)\barxiv\s*:\s*(\d{4}\.\d{4,5})(?:v(\d+))?", doc[0].get_text())
+        or ARXIV_RE.search(sample[:2000])
+    )
     normalized = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", sample.lower())).strip()
     shingles = {normalized[i : i + 60] for i in range(0, max(len(normalized) - 59, 0), 30)}
     fingerprint = hashlib.sha256("|".join(sorted(shingles)).encode()).hexdigest()
@@ -58,7 +64,24 @@ def _first_page_title(page: pymupdf.Page) -> str | None:
         size = max(span["size"] for span in spans)
         if size >= 14:
             candidates.append((size, -block["bbox"][1], text))
-    return max(candidates)[2] if candidates else None
+    if not candidates:
+        return None
+    title = max(candidates)[2]
+    if len(re.findall(r"\b[A-Z]\b", title)) >= 4:
+        # Some PDFs space individual glyphs in span data. Plain text retains
+        # the readable title lines, so use those when the span title is broken.
+        lines = [line.strip() for line in page.get_text().splitlines()[:15]]
+        title_lines = []
+        for line in lines:
+            if line.upper() == line and re.search(r"[A-Z]{3}", line) and len(line) >= 10:
+                if line.startswith(("Published as", "PUBLISHED AS")):
+                    continue
+                title_lines.append(line)
+            elif title_lines:
+                break
+        if title_lines:
+            return " ".join(title_lines)
+    return title
 
 
 def similarity(a: str, b: str) -> float:

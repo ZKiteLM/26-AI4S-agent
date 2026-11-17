@@ -135,6 +135,42 @@ button:disabled {
   display: grid;
   gap: 20px;
 }
+.model-active-config {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--brand);
+  border-radius: 9px;
+  background: var(--soft);
+}
+.model-active-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.model-active-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 12px 20px;
+  margin: 14px 0 0;
+}
+.model-active-details div {
+  min-width: 0;
+}
+.model-active-details dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.model-active-details dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.model-active-note {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
 .model-settings-fields {
   display: grid;
   gap: 14px;
@@ -267,8 +303,16 @@ h3 {
   width: 36px;
   height: 36px;
   border-radius: 11px;
-  background: #203a73;
-  color: #fff;
+  background: #fff;
+  border: 1px solid #dfeafa;
+  overflow: hidden;
+  flex: none;
+}
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 .brand-copy small {
   display: block;
@@ -1342,6 +1386,11 @@ h3 {
 }
 .login-showcase .brand {
   margin-bottom: 75px;
+}
+.login-showcase .brand-mark {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
 }
 .login-showcase h1 {
   max-width: 620px;

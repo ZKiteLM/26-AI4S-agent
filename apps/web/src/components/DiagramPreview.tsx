@@ -15,6 +15,7 @@ export default function DiagramPreview({
     svg: "",
     error: "",
   });
+  const [exportError, setExportError] = useState("");
   const current = preview.script === script ? preview : null;
   useEffect(() => {
     let cancelled = false;
@@ -25,6 +26,7 @@ export default function DiagramPreview({
           startOnLoad: false,
           securityLevel: "strict",
           theme: "neutral",
+          flowchart: { htmlLabels: false },
         });
         await mermaid.parse(script);
         const result = await mermaid.render(
@@ -46,39 +48,44 @@ export default function DiagramPreview({
   }, [script, onError]);
   async function download(kind: "svg" | "png") {
     if (!current?.svg) return;
-    const source = new Blob([current.svg], {
-      type: "image/svg+xml;charset=utf-8",
-    });
-    let blob = source;
-    if (kind === "png") {
-      const url = URL.createObjectURL(source);
-      try {
+    setExportError("");
+    try {
+      let blob: Blob = new Blob([current.svg], {
+        type: "image/svg+xml;charset=utf-8",
+      });
+      if (kind === "png") {
         const image = new Image();
-        image.src = url;
+        // Use the same self-contained data URL as the visible preview.
+        image.src = previewUrl;
         await image.decode();
         const canvas = document.createElement("canvas");
-        canvas.width = image.naturalWidth || 900;
-        canvas.height = image.naturalHeight || 600;
+        const width = image.naturalWidth || 900;
+        const height = image.naturalHeight || 600;
+        const scale = Math.min(2, 4096 / Math.max(width, height));
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
         const context = canvas.getContext("2d");
-        if (!context) return;
+        if (!context) throw new Error("浏览器无法创建图片画布");
         context.fillStyle = "white";
         context.fillRect(0, 0, canvas.width, canvas.height);
-        context.drawImage(image, 0, 0);
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
         blob = await new Promise<Blob>((resolve, reject) =>
-          canvas.toBlob((x) =>
-            x ? resolve(x) : reject(new Error("PNG export failed")),
+          canvas.toBlob(
+            (x) =>
+              x ? resolve(x) : reject(new Error("浏览器无法编码 PNG 图片")),
+            "image/png",
           ),
         );
-      } finally {
-        URL.revokeObjectURL(url);
       }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `architecture.${kind}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (cause) {
+      setExportError(`导出失败：${String(cause)}`);
     }
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `architecture.${kind}`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   const previewUrl = current?.svg
     ? `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(current.svg)))}`
@@ -86,6 +93,11 @@ export default function DiagramPreview({
   return (
     <div className="stack">
       {current?.error && <p className="error">图形语法错误：{current.error}</p>}
+      {exportError && (
+        <p className="error" role="alert">
+          {exportError}
+        </p>
+      )}
       {current?.svg && (
         <>
           <div

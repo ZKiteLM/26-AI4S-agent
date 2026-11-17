@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from ..ai import generate
@@ -35,26 +36,38 @@ def discover_references(
         if item.get("title") and item.get("abstract"):
             found[_key(item)] = item
             titles.add(re.sub(r"\W+", "", item["title"].casefold()))
-    for term in terms:
+    searches = [
+        (term, name, search)
+        for term in terms
         for name, search in (
             ("OpenAlex", lambda query, limit: search_external(query, limit, sort=None)),
             ("arXiv", search_arxiv),
-        ):
-            try:
-                for item in search(term, 5):
-                    if item.get("title") and item.get("abstract"):
-                        key = _key(item)
-                        old = found.get(key)
-                        title_key = re.sub(r"\W+", "", item["title"].casefold())
-                        if title_key in titles and key not in found:
-                            continue
-                        if not old or len(item.get("abstract") or "") > len(
-                            old.get("abstract") or ""
-                        ):
-                            found[key] = item
-                            titles.add(title_key)
-            except Exception as exc:
-                errors.append(f"{name}: {type(exc).__name__}")
+        )
+    ]
+
+    def search_one(spec):
+        term, name, search = spec
+        try:
+            return name, search(term, 5), None
+        except Exception as exc:
+            return name, [], type(exc).__name__
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for name, items, failure in executor.map(search_one, searches):
+            if failure:
+                errors.append(f"{name}: {failure}")
+            for item in items:
+                if item.get("title") and item.get("abstract"):
+                    key = _key(item)
+                    old = found.get(key)
+                    title_key = re.sub(r"\W+", "", item["title"].casefold())
+                    if title_key in titles and key not in found:
+                        continue
+                    if not old or len(item.get("abstract") or "") > len(
+                        old.get("abstract") or ""
+                    ):
+                        found[key] = item
+                        titles.add(title_key)
     # Ranking uses topic overlap and citation count, never publication date alone.
     words = {
         x
@@ -234,8 +247,10 @@ def create_draft(
     *,
     review: str = "",
     seed_candidates: list[dict] | None = None,
+    progress: Callable[[str, float], None] | None = None,
 ) -> dict:
     """Generate a draft from structured IDEA fields and program-verified references."""
+    report = progress or (lambda _phase, _value: None)
     preparation_warnings = []
     if fields is not None:
         structured = normalize_fields(fields)
@@ -249,9 +264,11 @@ def create_draft(
             structured = complete_fields(idea, structured, review)
         except ValueError as exc:
             preparation_warnings.append(f"IDEA 缺失字段未补全：{exc}")
+    report("searching", 0.15)
     references, errors, checked = discover_references(
         idea, structured["related_work_keywords"], seed_candidates
     )
+    report("writing", 0.55)
     catalog = "\n".join(
         f"[R{i}] {x['title']} ({x.get('year')}). Abstract: {(x.get('abstract') or '')[:1200]}"
         for i, x in enumerate(references, 1)
@@ -262,6 +279,7 @@ def create_draft(
         max_tokens=1800,
     )
     proposed_citations = len(re.findall(r"\[R\d+\]", body))
+    report("verifying", 0.8)
     body = review_claims(body, references)
     removed_citations = proposed_citations - len(re.findall(r"\[R\d+\]", body))
     result = assemble_draft(body, references)

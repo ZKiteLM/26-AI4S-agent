@@ -1,3 +1,5 @@
+from threading import Barrier
+
 import httpx
 import pytest
 from sqlalchemy import create_engine
@@ -260,6 +262,40 @@ def test_mermaid_repair_and_rejection(monkeypatch):
     )
     with pytest.raises(ValueError):
         generate_mermaid("A sends data to B")
+
+
+def test_mermaid_normalizes_label_breaks_but_rejects_html(monkeypatch):
+    monkeypatch.setattr(
+        "services.api.app.writing.copilot_diagram.generate",
+        lambda *args, **kwargs: "flowchart TD\nEval[准确率<br/>有效监督比例<br />训练开销]",
+    )
+    source = generate_mermaid("Draw evaluation metrics")
+    assert "Eval[准确率 / 有效监督比例 / 训练开销]" in source
+    assert "<" not in source
+
+    monkeypatch.setattr(
+        "services.api.app.writing.copilot_diagram.generate",
+        lambda *args, **kwargs: "flowchart TD\nA[<script>alert(1)</script>]",
+    )
+    with pytest.raises(ValueError, match="Invalid or unsafe Mermaid source"):
+        generate_mermaid("Draw evaluation metrics")
+
+
+def test_reference_sources_search_in_parallel(monkeypatch):
+    barrier = Barrier(2)
+
+    def search(_query, _limit, **_kwargs):
+        barrier.wait(timeout=5)
+        return [{"title": "Relevant Paper", "abstract": "A study of the research idea.", "doi": "10.1/x"}]
+
+    monkeypatch.setattr("services.api.app.writing.copilot_draft.search_external", search)
+    monkeypatch.setattr("services.api.app.writing.copilot_draft.search_arxiv", search)
+    monkeypatch.setattr(
+        "services.api.app.writing.copilot_draft.verify_reference",
+        lambda item: {**item, "verification": "verified"},
+    )
+    references, errors, _ = discover_references("research idea", ["research idea"])
+    assert len(references) == 1 and errors == []
 
 
 def test_idea_completion_keeps_existing_fields(monkeypatch):

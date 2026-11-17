@@ -23,6 +23,7 @@ import {
 type Version = {
   id: string;
   label: string;
+  filename: string;
   parse_status: string;
   page_count: number;
 };
@@ -443,10 +444,15 @@ export default function Reader({
               className={
                 item.id === version ? "button secondary" : "button ghost"
               }
+              title={item.filename}
               aria-pressed={item.id === version}
               onClick={() => switchVersion(item.id)}
             >
-              {item.label} · {item.parse_status}
+              {item.label}
+              {item.filename.toLowerCase().includes("_img.pdf")
+                ? " 扫描版"
+                : ""}{" "}
+              · {item.parse_status}
               {item.id === paper?.preferred_version_id ? " · 默认" : ""}
             </button>
           ))}

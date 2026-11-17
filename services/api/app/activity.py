@@ -65,12 +65,21 @@ def activity_feed(db: Session, owner_id: str) -> list[dict]:
                 "verifying": "正在核对论断和引用",
             }.get(phase, "正在整理图谱中的研究资料")
             href = "/graph"
+        elif task.type == "copilot_draft":
+            title = "生成论文框架"
+            detail = {
+                "preparing": "正在理解研究想法",
+                "searching": "正在查找和核验相关论文",
+                "writing": "正在撰写论文框架",
+                "verifying": "正在核对正文引用",
+            }.get((task.result or {}).get("phase"), "正在准备写作资料")
+            href = "/copilot"
         else:
             continue
         if task.status in {"completed", "partial"}:
             detail = "已完成" if task.status == "completed" else "已完成，部分引用数据暂不可用"
         elif task.status == "failed":
-            detail = "处理未完成，可以重试；如持续失败请查看调试后台"
+            detail = "处理未完成，请返回对应页面查看原因并重试"
         elif task.status == "queued":
             detail = "已排队，等待后台开始"
         items.append(

@@ -4,6 +4,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -223,7 +224,7 @@ def test_model_config(
     )
     try:
         reply = generate(
-            "Reply briefly in Chinese.", "请回复：连接成功", max_tokens=40, llm_config=candidate
+            "Reply briefly in Chinese.", "请回复：连接成功", max_tokens=400, llm_config=candidate
         )
     except AuthenticationError as exc:
         source = "输入的" if data.api_key.strip() else "已保存或服务器默认的"
@@ -240,6 +241,19 @@ def test_model_config(
         raise HTTPException(
             422, "接口拒绝了测试请求（HTTP 400），请检查接口类型和模型名称是否匹配。"
         ) from exc
+    except httpx.HTTPStatusError as exc:
+        if data.provider == "ollama":
+            try:
+                body = exc.response.json()
+                reason = body.get("error", "") if isinstance(body, dict) else ""
+            except ValueError:
+                reason = ""
+            detail = f"：{str(reason)[:200]}" if reason else ""
+            raise HTTPException(
+                422,
+                f"Ollama 请求失败（HTTP {exc.response.status_code}）{detail}。请核对模型名称和本机 Ollama 服务。",
+            ) from exc
+        raise HTTPException(422, f"模型接口请求失败（HTTP {exc.response.status_code}）。") from exc
     except Exception as exc:
         raise HTTPException(422, f"连接测试失败：{type(exc).__name__}") from exc
     if not reply.strip():

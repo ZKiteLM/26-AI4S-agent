@@ -85,15 +85,15 @@ python3 scripts/local_services.py status   # 查看状态
 
 ```bash
 uv run uvicorn services.api.app.main:app --reload --port 8000
-uv run celery -A services.api.app.worker.celery_app worker -l info -Q default --pool=solo --concurrency=1 -n default@%h
-uv run celery -A services.api.app.worker.celery_app worker -l info -Q parser --pool=solo -n parser@%h
+uv run celery -A services.api.app.worker.celery_app worker -l info -Q default --pool=threads --concurrency=2 -n default@%h
+uv run celery -A services.api.app.worker.celery_app worker -l info -Q parser --pool=threads --concurrency=2 -n parser@%h
 uv run celery -A services.api.app.worker.celery_app beat -l info
 cd apps/web && npm ci && npm run dev
 ```
 
 浏览器打开 `http://localhost:3000`，用 `.env` 中的演示账号登录。API 文档位于 `http://localhost:8000/docs`。若只验证 API，可设置 `DATABASE_URL=sqlite:///./dev.db`、`S3_ENDPOINT=`、`QDRANT_URL=`、`CELERY_TASK_ALWAYS_EAGER=1`，免启动容器运行确定性测试。
 
-登录后可从“系统 → 任务动态”查看论文解析等后台任务的状态。论文目录在 parser 队列任务完成后出现；若始终处于等待状态，先运行 `python3 scripts/local_services.py status` 检查解析 Worker，再查看 `.local_services/parser.log`。只导入元数据的记录没有 PDF，也不会生成目录。
+登录后可从“系统 → 任务动态”查看论文解析、论文框架等后台任务的状态。论文框架生成后可切换页面，完成的草稿会在返回写作页时恢复。论文目录在 parser 队列任务完成后出现；若始终处于等待状态，先运行 `python3 scripts/local_services.py status` 检查解析 Worker，再查看 `.local_services/parser.log`。只导入元数据的记录没有 PDF，也不会生成目录。
 
 论文详情页使用固定视口的 PDF 阅读工作区，页面本身不滚动。左侧文献大纲可在章节目录和 PDF 缩略图之间切换，也可收起；中间 PDF 阅读器始终保留。右侧“划词翻译”和“双语滚动”最多打开一个，“AI 问答”可独立开关；三个工具全部关闭时就是专注阅读。只有打开“划词翻译”后，选中的 PDF 文字才会进入翻译侧栏。主导航可折叠，拖动面板分隔条或用方向键调整宽度，“恢复默认比例”可重置布局。引用只有点击 PDF 中的编号文字才跳转，跳转后可返回引用处。双语滚动时 PDF 与译文按内容块联动；PDF 仅渲染视口附近页面，内容块和已缓存译文按页加载。“翻译当前页”只翻译未缓存的内容块，结果持久化。MinerU 解析的独立公式以 LaTeX 保存，行内公式会在翻译时保留，译文用 KaTeX 渲染。旧版本可在论文详情页重新解析；与旧内容完全一致的段落译文缓存会被保留，发生变化的内容需要重新翻译。
 
@@ -103,7 +103,7 @@ cd apps/web && npm ci && npm run dev
 
 引用图谱有两种方式：“库内关系分析”选择至少 2 篇已入库论文，只核验并显示它们之间的引用边，按内部入度和 PageRank 展示这批论文中的基石候选与边缘衍生论文；这是所选集合内的相对位置，不能当作整个领域的绝对排名。缺少学术标识或查询失败时会标明核验覆盖率。“扩展引用探索”可用一篇或多篇库内论文、或 DOI / arXiv / OpenAlex ID 作为种子，异步获取其参考文献与后续引用论文。外部节点只存入图谱，点击“加入文献库”才创建个人文献记录。探索模式下点击节点查看元数据，分别查找它引用的论文或引用它的论文；重新查询入口放在“数据维护”中。图谱、引用边及分页状态持久化。OpenAlex 为主数据源，Semantic Scholar 为备用；可选配置 `SEMANTIC_SCHOLAR_API_KEY`。升级已有数据库后，运行 `uv run python -m scripts.backfill_citation_works` 为旧论文补建统一身份关联；脚本可重复运行。
 
-选中已保存的图谱后，可删除该图谱（不会删除文献库中的论文），或生成基于图内论文的自动综述与未来工作探索。综述按内部 PageRank、入度及全局引用量挑选最多 20 篇论文，结合摘要和 Related Work 一次调用 LLM；上下文较长时缩减为 10 篇。未来工作探索结合已有综述和论文的局限性、展望等原文提出候选方向，再用 OpenAlex 检索；候选方向即使存在高度相近的研究也会展示，并附上相近论文、链接和核查状态。相近程度会结合检索论文的标题与摘要初筛，仍需核对全文；检索未发现重复也不保证想法绝对新颖。两类结果随图谱保存，图谱更新后需重新生成。
+选中已保存的图谱后，可删除该图谱（不会删除文献库中的论文），或生成基于图内论文的自动综述与未来工作探索。自动综述由 Planner 阅读图内文献并保存证据和大纲，Writer 按章节参考大纲、证据及已写章节撰文，Verifier 核对论断与引用；中间检查点可用于失败后继续。未来工作探索结合已有综述和论文的局限性、展望等原文提出候选方向，再用 OpenAlex 检索；候选方向即使存在高度相近的研究也会展示，并附上相近论文、链接和核查状态。相近程度会结合检索论文的标题与摘要初筛，仍需核对全文；检索未发现重复也不保证想法绝对新颖。两类结果随图谱保存，图谱更新后需重新生成。
 
 ### 本地模型与云端 API 切换
 
@@ -119,9 +119,9 @@ ollama pull bge-m3
 
 使用 OhMyGPT 时，在 `.env` 设置 `LLM_PROVIDER=ohmygpt`、`LLM_BASE_URL=https://api.ohmygpt.com/v1`、`LLM_MODEL=deepseek/deepseek-v4.1-flash-1017` 和 `OHMYGPT_API_KEY`。LLM 请求使用官方 OpenAI SDK 的 Responses API；Embedding 仍可独立使用本机 `bge-m3`。密钥只从环境变量读取。
 
-登录后可在 `/settings` 测试并切换个人模型接口（OpenAI 兼容接口、Responses 接口或本机 Ollama），`/tasks` 会以用户可读的方式显示论文解析、问答、主题追踪和图谱任务。个人 API Key 使用由 `APP_SECRET` 派生的密钥加密保存在数据库中，不通过读取接口返回；更换 `APP_SECRET` 前需重新配置个人密钥。运行中的任务继续使用启动时的模型配置，后续任务使用新配置。
+登录后可在 `/settings` 测试并切换个人模型接口（OpenAI 兼容接口、Responses 接口或本机 Ollama），`/tasks` 会以用户可读的方式显示论文解析、问答、主题追踪、图谱和论文框架任务。个人 API Key 使用由 `APP_SECRET` 派生的密钥加密保存在数据库中，不通过读取接口返回；更换 `APP_SECRET` 前需重新配置个人密钥。运行中的任务继续使用启动时的模型配置，后续任务使用新配置。
 
-扫描 PDF 使用本机 MinerU Worker：`uv run mineru-kit models download --tier basic` 后以 `PARSER_BACKEND=local` 运行。默认对 50 页以内的矢量 PDF 也做版式增强，提取公式 LaTeX 和表格；长文档使用分批 PyMuPDF 解析。需要增强长论文公式时可调高 `PARSER_VECTOR_MAX_PAGES`，解析耗时与模型调用量会相应增加。如需快速开发测试，可设 `PARSER_VECTOR_ENHANCE=0`。公网部署时将 `LLM_*`、`EMBEDDING_*` 指向云端服务，并设置 `PARSER_BACKEND=remote`、`MINERU_API_URL`、`MINERU_API_KEY`；业务代码和数据模型无需更改。远程解析适配 MinerU V1 `/v1/file_parse`；所选服务需要支持该接口。[接口说明](https://github.com/opendatalab/MinerU/blob/master/docs/en/usage/http_api.md)
+扫描 PDF 使用本机 MinerU Worker：`uv run mineru-kit models download --tier basic` 后以 `PARSER_BACKEND=local` 运行。默认对 50 页以内的矢量 PDF 也做版式增强，提取公式 LaTeX 和表格；长文档使用分批 PyMuPDF 解析。解析 Worker 默认同时处理 2 篇论文，可通过 `.env` 中的 `PARSER_CONCURRENCY` 调整；本地普通任务 Worker 的并发数由 `DEFAULT_WORKER_CONCURRENCY` 控制。增加并发会提高内存占用。需要增强长论文公式时可调高 `PARSER_VECTOR_MAX_PAGES`，解析耗时与模型调用量会相应增加。如需快速开发测试，可设 `PARSER_VECTOR_ENHANCE=0`。公网部署时将 `LLM_*`、`EMBEDDING_*` 指向云端服务，并设置 `PARSER_BACKEND=remote`、`MINERU_API_URL`、`MINERU_API_KEY`；业务代码和数据模型无需更改。远程解析适配 MinerU V1 `/v1/file_parse`；所选服务需要支持该接口。[接口说明](https://github.com/opendatalab/MinerU/blob/master/docs/en/usage/http_api.md)
 
 ### 公网部署准备
 

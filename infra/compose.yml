@@ -66,7 +66,7 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.api
-    command: uv run --locked celery -A services.api.app.worker.celery_app worker -l info -Q parser --pool=solo
+    command: uv run --locked celery -A services.api.app.worker.celery_app worker -l info -Q parser --pool=threads --concurrency=${PARSER_CONCURRENCY:-2}
     env_file: ../.env
     environment:
       DATABASE_URL: postgresql+psycopg://research:${POSTGRES_PASSWORD}@postgres:5432/research

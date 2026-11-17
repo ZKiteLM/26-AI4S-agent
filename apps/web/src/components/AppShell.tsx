@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import RequestProgress from "@/components/RequestProgress";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  BookOpenText,
   ChartNoAxesCombined,
   Compass,
   Files,
@@ -99,7 +99,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             onClick={() => setMenuOpen(false)}
           >
             <span className="brand-mark">
-              <BookOpenText size={21} strokeWidth={1.8} />
+              <Image src="/logo.jpg" alt="" width={36} height={36} priority />
             </span>
             <span className="brand-copy">
               科研小助手

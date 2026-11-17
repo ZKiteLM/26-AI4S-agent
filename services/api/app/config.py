@@ -23,11 +23,11 @@ class Settings(BaseSettings):
     app_secret: str = "development-only-secret"
     demo_email: str = "demo@example.com"
     demo_password: str = "change-me"
-    llm_base_url: str = ""
+    llm_base_url: str = "http://localhost:11434/v1"
     llm_api_key: str = ""
     ohmygpt_api_key: str = ""
-    llm_model: str = ""
-    llm_provider: Literal["openai", "ollama", "ohmygpt"] = "openai"
+    llm_model: str = "qwen3.5:9b"
+    llm_provider: Literal["openai", "ollama", "ohmygpt"] = "ollama"
     ollama_num_ctx: int = Field(default=16384, ge=4096, le=40960)
     agent_max_rounds: int = Field(default=8, ge=1, le=20)
     embedding_base_url: str = ""

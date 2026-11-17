@@ -51,6 +51,7 @@ from .paper_discovery.subscription_keywords import normalize_keywords
 from .parsing import parse_pdf
 from .retrieval import index_chunks, make_chunks, remove_version_index
 from .storage import Storage
+from .writing.copilot_jobs import build_draft
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,38 @@ celery_app.conf.beat_schedule = {
         "schedule": 86400.0,
     },
 }
+
+
+@celery_app.task(name="research.generate_copilot_draft")
+def run_copilot_draft(task_id: str) -> None:
+    with SessionLocal() as db:
+        task = db.get(BackgroundTask, task_id)
+        if not task or task.type != "copilot_draft" or task.status != "queued":
+            return
+        task.status = "running"
+        task.result = {"phase": "preparing"}
+        db.commit()
+
+        def progress(phase: str, value: float) -> None:
+            task.progress = value
+            task.result = {"phase": phase}
+            db.commit()
+
+        try:
+            with model_for_user(task.owner_id):
+                result = build_draft(db, task.owner_id, task.args, progress)
+            task.status = "completed"
+            task.progress = 1
+            task.result = {"phase": "completed", "artifact_id": result["artifact_id"]}
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            task = db.get(BackgroundTask, task_id)
+            task.status = "failed"
+            task.error = str(exc)[:1000]
+            task.result = {"phase": "failed"}
+            db.commit()
+            logger.exception("Paper framework generation failed: %s", task_id)
 
 
 def event(db, run_id: str, name: str, data: dict) -> None:

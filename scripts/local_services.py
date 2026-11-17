@@ -19,6 +19,22 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 RUN_DIR = ROOT / ".local_services"
 INFRA = ("postgres", "redis", "qdrant", "elasticsearch", "minio")
+
+
+def concurrency(name: str, default: int) -> str:
+    """Read worker limits from the shell or project .env, with a safe local cap."""
+    value = os.environ.get(name)
+    if value is None and (ROOT / ".env").exists():
+        for line in (ROOT / ".env").read_text().splitlines():
+            key, _, candidate = line.partition("=")
+            if key.strip() == name:
+                value = candidate.strip().strip("\"'")
+    try:
+        return str(min(8, max(1, int(value)))) if value is not None else str(default)
+    except ValueError:
+        return str(default)
+
+
 SERVICES = {
     "api": (
         ROOT,
@@ -37,8 +53,8 @@ SERVICES = {
             "info",
             "-Q",
             "default",
-            "--pool=solo",
-            "--concurrency=1",
+            "--pool=threads",
+            "--concurrency=" + concurrency("DEFAULT_WORKER_CONCURRENCY", 2),
             "-n",
             "default@%h",
         ],
@@ -56,7 +72,8 @@ SERVICES = {
             "info",
             "-Q",
             "parser",
-            "--pool=solo",
+            "--pool=threads",
+            "--concurrency=" + concurrency("PARSER_CONCURRENCY", 2),
             "-n",
             "parser@%h",
         ],

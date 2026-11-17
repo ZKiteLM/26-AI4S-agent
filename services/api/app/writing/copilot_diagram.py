@@ -16,6 +16,8 @@ def generate_mermaid(description: str, previous: str = "", error: str = "") -> s
         max_tokens=900,
     ).strip()
     source = re.sub(r"^```(?:mermaid)?\s*|\s*```$", "", raw, flags=re.I).strip()
+    # Models often use HTML line breaks in labels; keep the label without allowing HTML.
+    source = re.sub(r"(?i)<br\s*/?>", " / ", source)
     if (
         not source.startswith(ALLOWED)
         or len(source) > 20000

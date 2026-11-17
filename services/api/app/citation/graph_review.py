@@ -770,8 +770,11 @@ class ReviewResearch:
             )
             for _ in range(7):
                 before = len(messages)
+                # Once evidence has been read, keep the writer focused on
+                # submitting this section instead of repeatedly searching.
+                available_tools = WRITER_TOOLS if not self._writer_read else WRITER_TOOLS[2:]
                 reply = chat_with_tools(
-                    _compact_messages(messages, 21000), WRITER_TOOLS, max_tokens=2200
+                    _compact_messages(messages, 21000), available_tools, max_tokens=2200
                 )
                 messages.append(reply)
                 for call in reply.get("tool_calls") or []:
@@ -802,7 +805,12 @@ class ReviewResearch:
                     messages.append(
                         {
                             "role": "user",
-                            "content": "Use retrieve_evidence and write_section for this section.",
+                            "content": (
+                                "Evidence has been retrieved. Call write_section now with Chinese Markdown "
+                                "and valid evidence citations."
+                                if self._writer_read
+                                else "Use retrieve_evidence, then write_section for this section."
+                            ),
                         }
                     )
             else:
