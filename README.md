@@ -27,14 +27,12 @@ PDF 导入后由 parser Worker 生成按阅读顺序排列的 Block 和检索索
 - `scripts`：本地服务管理、索引重建与官方样例评测
 - `pyproject.toml`、`uv.lock`：Python 依赖声明与精确锁定版本；`parser` 和 `dev` 为可选依赖组
 
-## 团队信息
-
-> 提交前填写真实资料。当前尚未提供团队名称、成员及分工，不使用 GitHub 账号代替真实姓名。
+## 参赛信息
 
 | 项目 | 内容 |
 | --- | --- |
-| 团队名称 | 待填写 |
-| 成员及分工 | 待填写 |
+| 传智杯 UID | 2104766 |
+| 演示视频 | [Bilibili 视频](https://www.bilibili.com/video/BV1pKsC6sE62/) |
 | 代码仓库 | [ZKiteLM/26-AI4S-agent](https://github.com/ZKiteLM/26-AI4S-agent) |
 
 ## 本地运行
